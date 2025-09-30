@@ -3,6 +3,11 @@ import Jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 
+const streakSchema = new mongoose.Schema({
+  count: { type: Number, default: 0 },
+  lastUpdated: { type: Date, default: null },
+});
+
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -15,7 +20,7 @@ const userSchema = new mongoose.Schema(
       unique: true,
       trim: true,
       lowercase: true,
-      sparse: true, // allow null if SSO
+      sparse: true,
     },
     email: {
       type: String,
@@ -52,6 +57,18 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    currentTitle: {
+      type: String,
+    },
+    xp: { type: Number, default: 0 },
+    streak: { type: streakSchema, default: () => ({}) },
+    deviceInfo: [
+      {
+        deviceName: { type: String },
+        deviceBrand: { type: String }, 
+        deviceModel: { type: String },
+      },
+    ],
     verificationCode: String,
     verificationCodeExpire: Date,
     refreshTokens: [
@@ -96,19 +113,19 @@ userSchema.methods.getJwtToken = function () {
   });
 };
 
-userSchema.methods.getRefreshToken = function (uniqueId) {
-    const token = Jwt.sign({ id: this._id, deviceId: uniqueId }, process.env.REFRESH_SECRET, {
+userSchema.methods.getRefreshToken = function (deviceId) {
+    const token = Jwt.sign({ id: this._id, deviceId }, process.env.REFRESH_SECRET, {
       expiresIn: "60d",
     });
 
       // Remove any old token for this device
   this.refreshTokens = this.refreshTokens.filter(
-    (t) => t.device !== deviceName
+    (t) => t.deviceId !== deviceId
   );
   
     this.refreshTokens.push({
       token,
-      device: deviceName,
+      deviceId,
       expiresAt: Date.now() + 60 * 24 * 60 * 60 * 1000, // 60 days
     });
   
