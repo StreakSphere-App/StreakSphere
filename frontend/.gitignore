@@ -22,11 +22,6 @@ DerivedData
 *.xcuserstate
 **/.xcode.env.local
 
-# Android build artifacts
-*.apk
-*.aab
-
-
 # Android/IntelliJ
 #
 build/

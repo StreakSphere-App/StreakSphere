@@ -1,19 +1,19 @@
 module.exports = {
   apps: [
     {
-      name: "LifePulse-prod",
+      name: "StreakSphere-prod",
       script: "./backend/server.js",      // or your entry file
       env: {
         NODE_ENV: "production",
-        PORT: 3000
+        PORT: 8080
       }
     },
     {
-      name: "LifePulse-dev",
+      name: "StreakSphere-dev",
       script: "./backend/server.js",
       env: {
         NODE_ENV: "development",
-        PORT: 4000
+        PORT: 40000
       }
     }
   ]

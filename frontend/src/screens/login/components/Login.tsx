@@ -1,188 +1,383 @@
-import React, { useContext, useEffect, useState } from 'react';
-import Toast from "react-native-toast-message"
+import React, { useContext, useEffect, useRef, useState } from 'react';
 import {
-  Alert,
-  ImageBackground,
-  StyleSheet,
   View,
-  Image,
   KeyboardAvoidingView,
   Platform,
+  Keyboard,
+  TouchableOpacity,
+  Animated,
 } from 'react-native';
-import styles from './Loginstyles';
-import { Card, TextInput, Button, Checkbox, ActivityIndicator, Text } from 'react-native-paper';
+import { TextInput, Text } from 'react-native-paper';
+import NetInfo from '@react-native-community/netinfo';
+
 import AuthContext from '../../../auth/user/UserContext';
 import UserStorage from '../../../auth/user/UserStorage';
 import { UserLoginResponse } from '../../user/models/UserLoginResponse';
 import { setAuthHeaders, setSecretKey } from '../../../auth/api-client/api_client';
 import api_Login from '../services/api_Login';
-import api_InstituteProfile from '../services/api_Login';
-import AppActivityIndicator from '../../../components/Layout/AppActivityIndicator/AppActivityIndicator';
 import LoaderKitView from 'react-native-loader-kit';
-import colors from '../../../shared/styling/colors';
 import AppText from '../../../components/Layout/AppText/AppText';
+import { loginStyles } from './Loginstyles';
+import DeviceInfo from 'react-native-device-info';
+import { BlurView } from '@react-native-community/blur';
+import GlassyErrorModal from '../../../shared/components/GlassyErrorModal';
+import { CommonActions } from '@react-navigation/native';
 
 const Login = ({ navigation }: any) => {
-  const [check, setCheck] = useState(false);
+  const styles = loginStyles();
+
   const [loading, setLoading] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false); // show characters by default
   const authContext = useContext(AuthContext);
 
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorVisible, setErrorVisible] = useState(false);
+  const [offline, setOffline] = useState(false);
+
+  const showError = (message: string) => {
+    setErrorMessage(message);
+    setErrorVisible(true);
+  };
+
+  const hideError = () => {
+    setErrorVisible(false);
+    setErrorMessage(null);
+  };
+
+  // ---------- NetInfo: connectivity ----------
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      const isOffline =
+        !state.isConnected || state.isInternetReachable === false;
+      setOffline(isOffline);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  // ---------- Animated values for glassy background ----------
+  const anim1 = useRef(new Animated.Value(0)).current;
+  const anim2 = useRef(new Animated.Value(0)).current;
+  const anim3 = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const makeLoop = (animatedValue: Animated.Value, delay: number) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(animatedValue, {
+            toValue: 1,
+            duration: 9000,
+            delay,
+            useNativeDriver: true,
+          }),
+          Animated.timing(animatedValue, {
+            toValue: 0,
+            duration: 9000,
+            useNativeDriver: true,
+          }),
+        ]),
+      );
+
+    makeLoop(anim1, 0).start();
+    makeLoop(anim2, 1500).start();
+    makeLoop(anim3, 3000).start();
+  }, [anim1, anim2, anim3]);
+
+  // ---------- Restore user from Keychain (NO login API here) ----------
   const restoreUser = async () => {
-    const data = await UserStorage.getUser();
-    if (!data) return;
+    try {
+      const creds = await UserStorage.getUser();
+      if (!creds || !creds.username) return;
 
-    const objuser = JSON.parse(data.username);
-    setUsername(objuser.UserName);
-    setPassword(data.password);
+      const storedUser: UserLoginResponse = JSON.parse(creds.username);
 
-    handleSubmit({ username: objuser.UserName, password: data.password });
+      if (storedUser.UserName) setUsername(storedUser.UserName);
+      if (creds.password) setPassword(creds.password);
+
+      if (storedUser.accessToken) {
+        setAuthHeaders(storedUser.accessToken);
+        authContext?.setUser(storedUser);
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'Drawer' }],
+          }),
+        );
+      }
+    } catch (e) {
+      await UserStorage.deleteUser();
+    }
   };
 
   useEffect(() => {
     restoreUser();
   }, []);
 
-  const handleSubmit = async (values: any) => {
+  // ---------- Email/Password login (ONLY here you hit API) ----------
+  const handleSubmit = async (values: { username: string; password: string }) => {
+    Keyboard.dismiss();
+
+    if (offline) {
+      showError("You’re offline. Please connect to the internet and try again.");
+      return;
+    }
+
+    if (!values.username || !values.password) {
+      showError('Email and Password are required!');
+      return;
+    }
+
     setLoading(true);
 
-
-    if(values.username === "" || values.password === "") {
-      setLoading(false);
-      return Toast.show({ type: 'error', text1: 'Username and Password are required!'});
-    }
-
-    setSecretKey();
-
-    const response = await api_Login.getLogin(values.username, values.password);
-
-    if (!response.ok) {
-      UserStorage.deleteUser();
-      authContext?.setUser(null);
-      setLoading(false);
-      console.log(response);
-      
-      return Toast.show({ type: 'error', text1: 'Server is Down...'});
-    }
-
-    if (
-      typeof response.data === 'object' &&
-      response.data !== null &&
-      'Success' in response.data
-    ) {
-      const responseData = response.data as { Message: string; Success: boolean };
-
-      if (!responseData.Success) {
-        UserStorage.deleteUser();
-        authContext?.setUser(null);
-        setLoading(false);
-        return Toast.show({ type: 'error', text1: 'Username or Password is incorrect!'});
-      }
-    } else {
-      const user = response.data as UserLoginResponse;
-      user.Password = values.password;
-      setAuthHeaders(user.Token, user);
-
-      const InstituteProfileResponse = await api_InstituteProfile.GetInstituteProfile(
-        user.InstituteId,
-        user.BranchId,
-        true
+    try {
+      setSecretKey();
+      const deviceId = await DeviceInfo.getUniqueId();
+      const deviceName = await DeviceInfo.getDeviceName();
+      const deviceModel = DeviceInfo.getModel();
+      const deviceBrand = DeviceInfo.getBrand();
+      const response = await api_Login.getLogin(
+        values.username,
+        values.password,
+        deviceId,
+        deviceName,
+        deviceModel,
+        deviceBrand,
       );
 
-      if (!InstituteProfileResponse.ok) {
-        setLoading(false);
-        return Toast.show({ type: 'error', text1: 'Error Fetching Data!'});
+      if (!response.ok) {
+        await UserStorage.deleteUser();
+        authContext?.setUser(null);
+        showError(response.data?.message || 'Login failed');
+        return;
       }
 
-      if (
-        typeof InstituteProfileResponse.data === 'object' &&
-        InstituteProfileResponse.data !== null
-      ) {
-        user.InstituteProfile = InstituteProfileResponse.data;
+      const data = response.data as any;
+
+      if (data.requires2fa) {
+        navigation.navigate('TwoFA', {
+          twoFaToken: data.twoFaToken,
+          identifier: values.username,
+          pass: values.password
+        });
+        return;
       }
 
+      const user = data as UserLoginResponse;
+      user.UserName = values.username;
+      user.Password = values.password;
+
+      setAuthHeaders(user.accessToken);
       authContext?.setUser(user);
-      if (check) UserStorage.setUser(user);
+      await UserStorage.setUser(user);
 
-      navigation.navigate('Drawer');
+      if (user.accessToken) {
+        await UserStorage.setAccessToken(user.accessToken);
+      }
+      if (user.refreshToken) {
+        await UserStorage.setRefreshToken(user.refreshToken);
+      }
+
+      navigation.dispatch(
+        CommonActions.reset({
+          index: 0,
+          routes: [{ name: 'Drawer' }],
+        }),
+      );
+    } catch (e) {
+      showError('Unexpected error while logging in');
+    } finally {
+      setLoading(false);
     }
+  };
 
-    setLoading(false);
+  // Interpolated transforms for subtle motion
+  const blob1Style = {
+    transform: [
+      {
+        translateX: anim1.interpolate({
+          inputRange: [0, 1],
+          outputRange: [-40, 40],
+        }),
+      },
+      {
+        translateY: anim1.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0, 30],
+        }),
+      },
+    ],
+  };
+
+  const blob2Style = {
+    transform: [
+      {
+        translateX: anim2.interpolate({
+          inputRange: [0, 1],
+          outputRange: [30, -30],
+        }),
+      },
+      {
+        translateY: anim2.interpolate({
+          inputRange: [0, 1],
+          outputRange: [10, -20],
+        }),
+      },
+    ],
+  };
+
+  const blob3Style = {
+    transform: [
+      {
+        translateX: anim3.interpolate({
+          inputRange: [0, 1],
+          outputRange: [-20, 20],
+        }),
+      },
+      {
+        translateY: anim3.interpolate({
+          inputRange: [0, 1],
+          outputRange: [-30, 10],
+        }),
+      },
+    ],
   };
 
   return (
-    <ImageBackground
-      source={require('../../../shared/assets/login_bg_white.png')} // replace with your background image path
-      style={styles.background}
-      resizeMode="cover">
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <Card style={styles.card}>
-          <Card.Content>
-            <View style={styles.logoContainer}>
-              <Image
-                source={require('../../../shared/assets/logo.png')}
-                style={styles.logo}
-                resizeMode="contain"
+    <>
+      <View style={styles.root}>
+        <View style={styles.baseBackground} />
+        <View style={styles.glowTop} />
+        <View style={styles.glowBottom} />
+
+        <KeyboardAvoidingView
+          style={styles.kbWrapper}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+
+          <View style={styles.appNameWrapper}>
+            <Text style={styles.appName}>StreakSphere</Text>
+          </View>
+
+          <View style={styles.glassWrapper}>
+            <View style={styles.glassContent}>
+              <Text style={styles.mainTitle}>Welcome Back</Text>
+              <Text style={styles.mainSubtitle}>
+                To Login, Enter Credentials Below...
+              </Text>
+
+              <TextInput
+                label="Username or Email"
+                placeholder="Username or Email"
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={username}
+                onChangeText={setUsername}
+                style={styles.input}
+                mode="flat"
+                underlineColor="transparent"
+                activeUnderlineColor="transparent"
+                textColor="black"
+                placeholderTextColor="#9CA3AF"
               />
-            </View>
 
-            <TextInput
-              label="Username"
-              value={username}
-              onChangeText={setUsername}
-              style={styles.input}
-              mode="outlined"
-              left={<TextInput.Icon icon="account" />}
-              autoCapitalize="none"
-              activeOutlineColor='#5a75c2'
-            />
-
-            <TextInput
-              label="Password"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              style={styles.input}
-              mode="outlined"
-              left={<TextInput.Icon icon="lock" />}
-            />
-
-            <View style={styles.checkboxContainer}>
-              <Checkbox
-                status={check ? 'checked' : 'unchecked'}
-                onPress={() => setCheck(!check)}
-                color='#5a75c2'
+              <TextInput
+                label="Password"
+                placeholder="Password"
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry={!showPassword}   // keep visible when showPassword is true
+                autoCorrect={false}
+                autoCapitalize="none"
+                textContentType="password"
+                autoComplete="password"
+                style={styles.passwordInput}
+                mode="flat"
+                underlineColor="transparent"
+                activeUnderlineColor="transparent"
+                textColor="black"
+                placeholderTextColor="#9CA3AF"
+                right={
+                  <TextInput.Icon
+                    icon={showPassword ? 'eye-off' : 'eye'}
+                    onPress={() => setShowPassword((prev) => !prev)}
+                  />
+                }
               />
-              <Text>Remember Me</Text>
+
+              {loading ? (
+                <View style={styles.loadingOverlay}>
+                  <LoaderKitView
+                    style={{ width: 24, height: 24 }}
+                    name={'BallSpinFadeLoader'}
+                    animationSpeedMultiplier={1.0}
+                    color={'#FFFFFF'}
+                  />
+                  <AppText style={styles.loadingText}>Logging in...</AppText>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  onPress={() => handleSubmit({ username, password })}
+                  style={styles.primaryButton}
+                >
+                  <AppText style={styles.primaryButtonText}>Continue</AppText>
+                </TouchableOpacity>
+              )}
+
+              <View style={{ marginTop: 4, alignItems: 'center' }}>
+                <Text style={{ color: 'black' }}>
+                  Want to reset password?{' '}
+                  <Text
+                    style={{
+                      fontWeight: '700',
+                      textDecorationLine: 'underline',
+                      color: '#F9FAFB',
+                    }}
+                    onPress={() => navigation.navigate('ForgotPass')}
+                  >
+                    Forget Password
+                  </Text>
+                </Text>
+              </View>
+
+              <View style={{ marginTop: 5, alignItems: 'center' }}>
+                <Text style={{ color: 'black' }}>
+                  Don’t have an account?{' '}
+                  <Text
+                    style={{
+                      fontWeight: '700',
+                      textDecorationLine: 'underline',
+                      color: '#F9FAFB',
+                    }}
+                    onPress={() => navigation.navigate('Register')}
+                  >
+                    Register
+                  </Text>
+                </Text>
+              </View>
+
+              <Text style={styles.termsText}>
+                By logging in or continuing, you agree to our Terms of Service
+                and Privacy Policy
+              </Text>
             </View>
+          </View>
+        </KeyboardAvoidingView>
+      </View>
 
-            {loading ? (
-             <View style={styles.loadingOverlay}>
-             <LoaderKitView
-         style={{ width: 60, height: 60 }}
-         name={'BallSpinFadeLoader'}
-         animationSpeedMultiplier={1.0} // speed up/slow down animation, default: 1.0, larger is faster
-         color={colors.primary} // Optional: color can be: 'red', 'green',... or '#ddd', '#ffffff',...
-       />
-       <AppText style={styles.loadingText}>Logging in...</AppText>
-           </View>
-) : (
-  <Button
-    onPress={() => handleSubmit({ username, password })}
-    style={styles.button}>
-      <AppText style={{color: "white"}}>
-    Login
-    </AppText>
-  </Button>
-)}
-
-          </Card.Content>
-        </Card>
-      </KeyboardAvoidingView>
-    </ImageBackground>
+      <GlassyErrorModal
+        visible={errorVisible || offline}
+        message={
+          offline && !errorMessage
+            ? "You’re offline. Please connect to the internet and try again."
+            : errorMessage || ''
+        }
+        onClose={hideError}
+      />
+    </>
   );
 };
 
