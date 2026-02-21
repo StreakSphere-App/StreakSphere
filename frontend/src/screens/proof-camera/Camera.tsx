@@ -81,6 +81,14 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
     setModalMessage(null);
   };
 
+  const isMountedRef = useRef(true);
+
+useEffect(() => {
+  return () => {
+    isMountedRef.current = false;
+  };
+}, []);
+
   // Camera permissions
   useEffect(() => {
     (async () => {
@@ -177,7 +185,8 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
   const userId = authContext?.User?.user?.id ;
   const uploadProof = async (uri: string, habitId: string) => {
     try {
-      setUploading(true);
+      if (isMountedRef.current) setUploading(true);
+  
       const formData = new FormData();
       formData.append('proof', {
         uri,
@@ -186,56 +195,43 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
       } as any);
       formData.append('habitId', habitId);
       formData.append('userId', userId);
-
+  
       const res = await ProofApi.SubmitProof(formData);
-      console.log(res);
-      
       const data = (res as any).data ?? res;
-
-      if (data?.success) {
-        const reason = data.reason as string | undefined;
-
-        // Show a glassy success/notice card, then go back
-        if (reason) {
-          showMessage(reason);
-          // Optionally wait for user to close instead of auto-goBack
-          // Here we'll auto close + go back after a short delay
-          setTimeout(() => {
-            hideMessage();
-            navigation.goBack();
-          }, 1500);
-        } else {
-
-            navigation.goBack();
-        }
-      } else {
-        showMessage(data?.message || 'Upload failed. Please try again.');
+  
+      // Since you already navigated back, don't show modals here.
+      // If you want, you can log / or trigger a global toast system.
+      if (!data?.success) {
+        console.log('Upload failed:', data?.message);
       }
     } catch (err) {
-      console.error('Upload error:', err);
-      showMessage('Server error while uploading proof.');
+      console.log('Upload error:', err);
     } finally {
-      setUploading(false);
+      if (isMountedRef.current) setUploading(false);
     }
   };
 
   const handleTakePhoto = async () => {
     if (!habitId) {
-      // Prompt user to select an activity, and open the picker
       showMessage('Please select an activity before capturing proof.');
       setHabitModalVisible(true);
       return;
     }
     if (!cameraRef.current) return;
-
+  
     try {
       const photo = await cameraRef.current.takePhoto({
         qualityPrioritization: 'balanced',
         flash: 'off',
       });
-
+  
       const filePath = `file://${photo.path}`;
-      await uploadProof(filePath, habitId);
+  
+      // Start upload in background (don't await)
+      uploadProof(filePath, habitId);
+  
+      // Immediately navigate back
+      navigation.goBack();
     } catch (err) {
       console.error('Capture error:', err);
       showMessage('Failed to capture photo. Please try again.');
@@ -289,7 +285,7 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
 
           {habitsLoading ? (
             <View style={styles.modalLoading}>
-              <AppActivityIndicator visible />
+             
             </View>
           ) : (
             <SectionList
@@ -360,7 +356,7 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
         ref={cameraRef}
         style={StyleSheet.absoluteFillObject}
         device={device}
-        isActive={!uploading}
+        isActive={true}
         photo={true}
       />
 
@@ -416,7 +412,6 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
           <TouchableOpacity
             style={styles.shutterOuterGlass}
             onPress={handleTakePhoto}
-            disabled={uploading}
             activeOpacity={0.8}
           >
             <View style={styles.shutterInner} />
@@ -567,7 +562,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(0,0,0,0.0)',
     paddingHorizontal: 16,
     marginBottom: 100
   },
@@ -618,8 +613,8 @@ const styles = StyleSheet.create({
   },
   habitItem: {
     paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(31, 41, 55, 0.8)',
+    borderBottomWidth: 0.1,
+    borderBottomColor: "white",
   },
   habitIconCircle: {
     width: 32,
