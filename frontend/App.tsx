@@ -8,7 +8,7 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import ReactNativeBiometrics from 'react-native-biometrics';
 
-import notifee, { AndroidImportance } from '@notifee/react-native';
+import notifee, { AndroidImportance, EventType } from '@notifee/react-native';
 
 import {
   getMessaging,
@@ -38,27 +38,83 @@ import { TextEncoder, TextDecoder } from 'text-encoding';
 // ---- BACKGROUND HANDLER (must be at module/root level!) ----
 import messaging from '@react-native-firebase/messaging';
 
-// Notifee channel setup (must exist BEFORE any notifications are shown)
+/**
+ * ---------------------------
+ * Channel (sound + vibration)
+ * ---------------------------
+ * NOTE: channels are sticky on Android. If "default" was silent before,
+ * you may need uninstall/reinstall OR change channel id.
+ */
+const CHAT_CHANNEL_ID = 'default';
+
 notifee.createChannel({
-  id: 'default',
+  id: CHAT_CHANNEL_ID,
   name: 'Default Channel',
   importance: AndroidImportance.HIGH,
+  sound: 'default',
+  vibration: true,
 });
+
+/**
+ * ✅ Group notifications by SENDER (peerUserId)
+ * - All messages from same sender stack together.
+ * - Different senders create separate groups (still under your app).
+ */
+async function displayChatNotificationGroupedBySender(data: any) {
+  const peerId = String(data.peerUserId || 'unknown');
+  const peerName = data.username || 'Someone';
+
+  const messageId = data.messageId || data.msgId || data._id || Date.now();
+  const body = data.body || data.text || 'Sent you a message';
+
+  // Group per sender
+  const groupId = `chat:${peerId}`;
+  const summaryId = `chat-summary:${peerId}`;
+
+  // 1) Actual message notification
+  await notifee.displayNotification({
+    id: `chat:${peerId}:msg:${messageId}`,
+    title: peerName,
+    body,
+    android: {
+      channelId: CHAT_CHANNEL_ID,
+      groupId,
+      pressAction: { id: 'default' },
+    },
+    data: {
+      type: 'chat',
+      peerUserId: peerId,
+    },
+  });
+
+  // 2) Summary notification (required for reliable grouping)
+  await notifee.displayNotification({
+    id: summaryId,
+    title: peerName,
+    body: 'New messages',
+    android: {
+      channelId: CHAT_CHANNEL_ID,
+      groupId,
+      groupSummary: true,
+      pressAction: { id: 'default' },
+    },
+    data: {
+      type: 'chat_summary',
+      peerUserId: peerId,
+    },
+  });
+}
 
 messaging().setBackgroundMessageHandler(async remoteMessage => {
   const data = remoteMessage?.data || {};
+
   if (data.type === 'chat') {
-    // Show notification for chat type
-    await notifee.displayNotification({
-      title: data.username || 'Someone',
-      body: 'Sent you a message',
-      android: { channelId: 'default' },
-    });
+    await displayChatNotificationGroupedBySender(data);
   }
+
   if (data.type === 'seen') {
     markMessagesSeenLocally(data.peerUserId);
   }
-  // Additional cases can go here
 });
 
 // Android 13+ notification runtime permission
@@ -88,6 +144,43 @@ const App = () => {
     requestNotificationPermission();
   }, []);
 
+  // ---------- Notifee notification press handler ----------
+  useEffect(() => {
+    // Foreground/background (app is running)
+    const unsubscribe = notifee.onForegroundEvent(async ({ type, detail }) => {
+      if (
+        type === EventType.PRESS &&
+        detail?.notification?.data?.type === 'chat' &&
+        detail?.notification?.data?.peerUserId
+      ) {
+        navigationRef.current?.navigate('chat', {
+          peerUserId: detail.notification.data.peerUserId,
+          peerName: detail.notification.data.peerName,
+        });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    // Cold start launch by notification
+    async function checkInitialNotification() {
+      const initial = await notifee.getInitialNotification();
+      if (
+        initial?.notification?.data?.type === 'chat' &&
+        initial?.notification?.data?.peerUserId
+      ) {
+        setTimeout(() => {
+          navigationRef.current?.navigate('chat', {
+            peerUserId: initial.notification.data.peerUserId,
+            peerName: initial.notification.data.peerName,     
+          });
+        }, 600);
+      }
+    }
+    checkInitialNotification();
+  }, []);
+
   // ---------- Setup secret key once ----------
   useEffect(() => {
     if (!secretKeySetRef.current) {
@@ -111,11 +204,7 @@ const App = () => {
           const activePeer = getActiveChatPeer();
           if (!activePeer || activePeer !== data.peerUserId) {
             notifyIncoming(data.peerUserId);
-            await notifee.displayNotification({
-              title: data.username || 'Someone',
-              body: 'Sent you a message',
-              android: { channelId: 'default' },
-            });
+            await displayChatNotificationGroupedBySender(data);
           }
         }
         if (data.type === 'seen' && data.peerUserId) {
@@ -135,12 +224,12 @@ const App = () => {
   // ---------- Register token AFTER user is available + token refresh ----------
   useEffect(() => {
     if (Platform.OS !== 'android') return;
-    if (!User) return;    // <-- Use a stable ID or username
+    if (!User) return;
 
     let unsubscribeTokenRefresh: undefined | (() => void);
 
     const register = async (token: string) => {
-      if (lastRegisteredTokenRef.current === token) return; // Prevent duplicate!
+      if (lastRegisteredTokenRef.current === token) return;
       await apiClient.post('/push/register', { token, platform: 'android' });
       lastRegisteredTokenRef.current = token;
       console.log('[FCM] Registered token:', token);
@@ -161,7 +250,7 @@ const App = () => {
     return () => {
       if (unsubscribeTokenRefresh) unsubscribeTokenRefresh();
     };
-  }, [User]); // Use only a stable primitive!
+  }, [User]);
 
   // ---------- Biometric gate ----------
   useEffect(() => {
@@ -212,7 +301,6 @@ const App = () => {
     checkBiometric();
   }, []);
 
-  // ---------- Toast config ----------
   const toastConfig = {
     success: (props: React.JSX.IntrinsicAttributes & BaseToastProps) => (
       <BaseToast
@@ -243,7 +331,6 @@ const App = () => {
     ),
   };
 
-  // ---------- Small splash while checking biometrics ----------
   if (isCheckingBiometric) {
     return (
       <PaperProvider

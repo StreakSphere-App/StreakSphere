@@ -21,6 +21,8 @@ import ProfileScreen from '../profile/components/Profile';
 import NewChatScreen from '../chat/components/NewChatScreen';
 import MoodScreen from '../moodscreen/comp/component/MoodScreen';
 import Friends from '../friends/components/Friends';
+import ProfilePreviewScreen from '../profile/components/ProfilePreview';
+import FriendsListScreen from '../friends/components/FriendsList';
 
 
 
@@ -39,6 +41,8 @@ const DrawerNavigator = () => (
     <Drawer.Screen name="Profile" component={ProfileScreen} options={{headerShown: false}} />
     <Drawer.Screen name="NewChat" component={NewChatScreen} options={{headerShown: false}}/>
     <Drawer.Screen name="MoodScreen" component={MoodScreen}  options={{headerShown: false}}/>
+    <Drawer.Screen name="FriendsManage" component={FriendsListScreen}  options={{headerShown: false}}/>
+    <Drawer.Screen name="ProfilePreview" component={ProfilePreviewScreen} options={{headerShown: false}}/>
     <Drawer.Screen name="Friends" component={Friends} options={{headerShown: false}}/>
   </Drawer.Navigator>
 );

@@ -160,6 +160,8 @@ resetPasswordVerified: {
   type: Boolean,
   default: false,
 },
+deleteAccountOtp: String,
+deleteAccountOtpExpire: Date,
     refreshTokens: [
       {
         token: { type: String, required: true },
@@ -170,7 +172,7 @@ resetPasswordVerified: {
 
     isPublic: {
       type: Boolean,
-      default: false
+      default: true
   },
   followers: [
       {

@@ -10,6 +10,7 @@ import https from 'https';
 import fs from 'fs';
 import cron from 'node-cron';
 
+
 const app = express();
 // Load environment based on NODE_ENV
 const envFile = `.env.${process.env.NODE_ENV || ''}`;
@@ -39,6 +40,17 @@ export const transporter = nodemailer.createTransport({
   greetingTimeout: 20000,
   socketTimeout: 20000,
 });
+
+import os from "os";
+import path from "path";
+
+// Home directory of server
+const HOME_DIR = os.homedir();
+
+// Global uploads path
+const AVATAR_PATH = path.join(HOME_DIR, "uploads", "avatars");
+
+app.use('/avatars', express.static(AVATAR_PATH));
 
 //import routes
 import AuthRoutes from "./routes/AuthRoutes.js"

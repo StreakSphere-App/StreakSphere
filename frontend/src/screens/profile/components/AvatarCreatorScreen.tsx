@@ -1,174 +1,182 @@
-import React, { useRef, useState } from 'react';
-import { View, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import {
+  View,
+  StyleSheet,
+  TouchableOpacity,
+  Image,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
 import { Text } from '@rneui/themed';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import { launchImageLibrary } from 'react-native-image-picker';
+import profileApi from '../services/api_profile'; // Your API
 import { useNavigation } from '@react-navigation/native';
-import { WebView, WebViewMessageEvent } from 'react-native-webview';
-import LoaderKitView from 'react-native-loader-kit';
+import apiClient from '../../../auth/api-client/api_client';
 
-import profileApi from '../services/api_profile';
+// Set your backend base (for local avatars, adjust as needed)
+const baseUrl = apiClient.getBaseURL(); // Example: "http://localhost:40000/api"
+const BASE_SERVER_URL = baseUrl.replace(/\/api\/?$/, "");
 
-const RPM_URL = 'https://streaksphere.readyplayer.me/avatar?frameApi';
+export default function ProfilePicUploaderScreen() {
+  const navigation = useNavigation();
+  const [photoUri, setPhotoUri] = useState(null);
+  const [avatarUrl, setAvatarUrl] = useState(null);
+  const [uploading, setUploading] = useState(false);
 
-const AvatarCreatorScreen = () => {
-  const navigation = useNavigation<any>();
-  const webViewRef = useRef<WebView | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const handleMessage = async (event: WebViewMessageEvent) => {
-    const raw = event.nativeEvent.data;
-    let parsed: any = null;
-
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      parsed = null;
-    }
-
-    // CASE 1: plain URL string (or quoted URL)
-    if (typeof parsed === 'string' || (typeof raw === 'string' && raw.startsWith('http'))) {
-      const url = typeof parsed === 'string' ? parsed : raw;
-      const cleanedUrl = url.replace(/^"|"$/g, '');
-
+  // Load current avatar from backend on mount
+  useEffect(() => {
+    const load = async () => {
       try {
-        await profileApi.updateAvatarUrl(cleanedUrl);
-      } catch {
-        // handle error (toast, etc.)
-      } finally {
-        navigation.goBack();
+        const res = await profileApi.getAvatarUrl();
+        // Prefer .data.avatarUrl if you use their getMyAvatar API
+        setAvatarUrl(res?.data?.avatarUrl ?? null);
+      } catch (e) {
+        setAvatarUrl(null);
       }
+    };
+    load();
+  }, []);
+
+  const pickPhoto = async () => {
+    const res = await launchImageLibrary({ mediaType: 'photo', quality: 0.8 });
+    if (res.didCancel) return;
+    if (res.errorCode) {
+      Alert.alert('Error', res.errorMessage || 'Failed to pick image');
       return;
     }
+    if (res.assets?.[0]?.uri) setPhotoUri(res.assets[0].uri);
+  };
 
-    // CASE 2: structured event
-    const data = parsed;
-    if (!data || typeof data !== 'object') return;
+  const uploadPhoto = async () => {
+    if (!photoUri) return;
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('avatar', {
+        uri: photoUri,
+        type: 'image/jpeg',
+        name: 'avatar.jpg',
+      });
+      const uploadRes = await profileApi.updateAvatarImage(formData);
+      // If your API returns the new url, update local state:
+      setAvatarUrl(uploadRes?.data?.url ?? null);
+      setPhotoUri(null);
+      Alert.alert('Success', 'Profile photo updated!');
+      navigation.goBack();
+    } catch (e) {
+      Alert.alert('Error uploading photo', e?.message || 'Try again later');
+    }
+    setUploading(false);
+  };
 
-    if (data.source && data.source !== 'readyplayerme') return;
-
-    switch (data.eventName) {
-      case 'v1.frame.ready':
-        // Frame ready – could send queries if needed
-        break;
-
-      case 'v1.avatar.exported': {
-        const avatarUrl = data.data?.url;
-        if (!avatarUrl) return;
-
-        try {
-          await profileApi.updateAvatarUrl(avatarUrl, data.data || {});
-        } catch {
-          // handle error
-        } finally {
-          navigation.goBack();
-        }
-        break;
-      }
-
-      default:
-        break;
+  const deleteAvatar = async () => {
+    try {
+      await profileApi.deleteAvatar();
+      setPhotoUri(null);
+      setAvatarUrl(null); // clear displayed avatar
+      Alert.alert('Success', 'Profile picture removed!');
+    } catch (e) {
+      Alert.alert('Error', e?.message || 'Failed to remove profile photo.');
     }
   };
 
-  const renderHeader = () => (
-    <View style={styles.header}>
-      <TouchableOpacity
-        activeOpacity={0.8}
-        style={styles.backButton}
-        onPress={() => navigation.goBack()}
-      >
-        <Icon name="arrow-left" size={24} color="#111827" />
-      </TouchableOpacity>
-      <Text style={styles.headerTitle}>Create 3D Avatar</Text>
-      <View style={styles.headerRightSpacer} />
-    </View>
-  );
+  // Compose image url for local uploads (if needed)
+  const avatarDisplayUrl =
+    photoUri ||
+    (avatarUrl
+      ? BASE_SERVER_URL + avatarUrl
+      : null);
 
   return (
     <View style={styles.root}>
-      {renderHeader()}
-
-      <View style={styles.webviewWrapper}>
-        {loading && (
-          <View style={styles.loaderOverlay}>
-            <LoaderKitView
-              style={{ width: 32, height: 32 }}
-              name="BallSpinFadeLoader"
-              animationSpeedMultiplier={1.0}
-              color="#6366F1"
-            />
-            <Text style={{ marginTop: 6, color: '#111827', fontSize: 12 }}>
-              Loading avatar creator...
-            </Text>
-          </View>
-        )}
-
-        <WebView
-          ref={webViewRef}
-          source={{ uri: RPM_URL }}
-          style={styles.webview}
-          onMessage={handleMessage}
-          onLoadEnd={() => setLoading(false)}
-          javaScriptEnabled
-          domStorageEnabled
-          originWhitelist={['*']}
-        />
+          <View style={styles.topBar}>
+              <TouchableOpacity activeOpacity={0.8} style={styles.iconGlass}
+          onPress={() => navigation.goBack()}>
+          <Icon name="arrow-left" size={24} color="#E5E7EB" />
+        </TouchableOpacity>
+        <Text style={styles.pageTitle}>Upload Profile Pic</Text>
+        <View style={styles.rightSpacer} />
       </View>
+      <TouchableOpacity style={styles.avatarWrap} onPress={pickPhoto} activeOpacity={0.95}>
+        {avatarDisplayUrl ? (
+          <Image
+            style={styles.avatar}
+            source={{ uri: avatarDisplayUrl }}
+            resizeMode="cover"
+          />
+        ) : (
+          <Icon name="account-circle-outline" size={120} color="#6366f1" />
+        )}
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={[styles.saveBtn, { opacity: photoUri ? 1 : 0.5 }]}
+        onPress={uploadPhoto}
+        disabled={!photoUri || uploading}
+      >
+        {uploading ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveBtnTxt}>Upload</Text>}
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.cancelBtn} onPress={() => navigation.goBack()}>
+        <Text style={styles.cancelBtnTxt}>Cancel</Text>
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.deleteBtn} onPress={deleteAvatar}>
+        <Text style={styles.deleteBtnTxt}>Remove Profile Picture</Text>
+      </TouchableOpacity>
+      <Text style={styles.hint}>Tap the avatar above to choose a new photo.</Text>
     </View>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    paddingTop: Platform.OS === 'android' ? 32 : 48,
-    backgroundColor: '#FFFFFF',
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 18,
-    marginBottom: 8,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 16,
+  root: { flex: 1, backgroundColor: '#000', alignItems: 'center', paddingTop: 56 },
+  header: { fontSize: 19, color: '#fff', fontWeight: 'bold', marginBottom: 36 },
+  avatarWrap: {
+    width: 140,
+    height: 140,
+    borderRadius: 70,
     backgroundColor: '#F3F4F6',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#6366f1',
     justifyContent: 'center',
     alignItems: 'center',
+    marginBottom: 18,
   },
-  headerTitle: {
-    flex: 1,
+  avatar: { width: 140, height: 140, borderRadius: 70 },
+  saveBtn: {
+    backgroundColor: '#6366f1',
+    paddingHorizontal: 40,
+    paddingVertical: 12,
+    borderRadius: 18,
+    marginTop: 22,
+    marginBottom: 6,
+  },
+  saveBtnTxt: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  cancelBtn: { paddingHorizontal: 32, paddingVertical: 11, marginTop: 6 },
+  cancelBtnTxt: { color: '#6b7280', fontWeight: 'bold', fontSize: 15 },
+  deleteBtn: {
+    marginTop: 10,
+    paddingHorizontal: 32,
+    paddingVertical: 11,
+    backgroundColor: '#EF4444',
+    borderRadius: 18,
+  },
+  deleteBtnTxt: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 15,
     textAlign: 'center',
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#111827',
   },
-  headerRightSpacer: {
-    width: 40,
-    height: 40,
-  },
-  webviewWrapper: {
-    flex: 1,
-    marginTop: 4,
-  },
-  webview: {
-    flex: 1,
-  },
-  loaderOverlay: {
-    position: 'absolute',
-    zIndex: 10,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    pageTitle: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "700", color: "#F9FAFB" },
+  rightSpacer: { width: 40, height: 40 },
+  hint: { color: '#a1a1aa', marginTop: 12, fontSize: 13 },
+  topBar: { flexDirection: "row", alignItems: "center", marginTop: 3, marginBottom: 30 },
+  iconGlass: {
+    width: 40, height: 40, borderRadius: 16,
+    backgroundColor: "rgba(15, 23, 42, 0.0)",
+    borderWidth: 1, borderColor: "rgba(148, 163, 184, 0.4)",
+    justifyContent: "center", alignItems: "center", marginRight: 0,
+    shadowColor: "#000", shadowOpacity: 0.15, shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 10, elevation: 4, marginLeft: 12, marginTop: 5
   },
 });
-
-export default AvatarCreatorScreen;

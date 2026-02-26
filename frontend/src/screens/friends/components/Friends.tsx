@@ -16,6 +16,7 @@ import AppScreen from "../../../components/Layout/AppScreen/AppScreen";
 import socialApi from "../services/api_friends";
 import AuthContext from "../../../auth/user/UserContext";
 import { UserProfile, FollowRequest } from "../models/FriendModel";
+import apiClient from "../../../auth/api-client/api_client";
 
 const GLASS_BG = "rgba(15, 23, 42, 0.65)";
 const GLASS_BORDER = "rgba(148, 163, 184, 0.35)";
@@ -81,6 +82,18 @@ const Friends = ({ navigation }: any) => {
   const [showRemoveModal, setShowRemoveModal] = useState<{ user: UserProfile | null } | null>(null);
 
   const isSearching = search.trim().length > 0;
+
+  const baseUrl = apiClient.getBaseURL(); // Example: "http://localhost:40000/api"
+  const newUrl = baseUrl.replace(/\/api\/?$/, "");
+
+  const openProfilePreview = (u: any) => {
+    if (!u?._id) return;
+    navigation.navigate("ProfilePreview", {
+      userId: u._id,
+      name: u.name,
+      username: u.username,
+    });
+  };
 
   useEffect(() => {
     if (notification) {
@@ -233,87 +246,132 @@ const Friends = ({ navigation }: any) => {
       user.username?.slice(0, 2)?.toUpperCase() ||
       "?";
 
-    return (
-      <View style={styles.userCard}>
-        <View style={[styles.avatar, { backgroundColor: user.avatarColor || "rgba(55, 65, 81, 0.9)" }]}>
-          <Text style={styles.avatarText}>{initials}</Text>
-        </View>
-        <View style={styles.userInfo}>
-          <Text style={styles.userName}>{user.name ?? user.username}</Text>
-          <Text style={styles.userUsername}>{user.username}</Text>
-        </View>
-
-        {isRequest ? (
-          <View style={{ flexDirection: "row" }}>
+      return (
+        <View style={styles.userCard}>
+          {/* Clickable left side -> opens profile preview */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            style={styles.userClickable}
+            onPress={() => openProfilePreview(user)}
+          >
+{user.avatarUrl ? (
+      <Image
+        source={{ uri: newUrl + user.avatarUrl }}
+        style={{ width: 40, height: 40, borderRadius: 999 }}
+        resizeMode="cover"
+      />
+    ) : (
+      <Text style={styles.avatarText}>{initials}</Text>
+    )}
+      
+            <View style={styles.userInfo}>
+              <Text style={styles.userName} numberOfLines={1}>
+                {user.name ?? user.username}
+              </Text>
+              <Text style={styles.userUsername} numberOfLines={1}>
+                {user.username}
+              </Text>
+            </View>
+          </TouchableOpacity>
+      
+          {/* Right side buttons (unchanged logic) */}
+          {isRequest ? (
+            <View style={{ flexDirection: "row" }}>
+              <TouchableOpacity
+                activeOpacity={0.7}
+                style={[
+                  styles.addBtn,
+                  {
+                    backgroundColor:
+                      loadingActions === user._id ? "#d1d5db" : "#22C55E",
+                    marginRight: 6,
+                  },
+                ]}
+                onPress={() => handleAcceptRequest(item as FollowRequest)}
+                disabled={loadingActions === user._id}
+              >
+                <Icon name="check" size={18} color="#F9FAFB" />
+                <Text style={styles.addBtnText}>
+                  {loadingActions === user._id ? "..." : "Accept"}
+                </Text>
+              </TouchableOpacity>
+      
+              <TouchableOpacity
+                activeOpacity={0.7}
+                style={[
+                  styles.addBtn,
+                  {
+                    backgroundColor:
+                      loadingActions === user._id ? "#d1d5db" : "#EF4444",
+                  },
+                ]}
+                onPress={() => handleRejectRequest(item as FollowRequest)}
+                disabled={loadingActions === user._id}
+              >
+                <Icon name="close" size={18} color="#F9FAFB" />
+                <Text style={styles.addBtnText}>
+                  {loadingActions === user._id ? "..." : "Reject"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : user.isFriend ? (
             <TouchableOpacity
-              activeOpacity={0.7}
-              style={[
-                styles.addBtn,
-                { backgroundColor: loadingActions === user._id ? "#d1d5db" : "#22C55E", marginRight: 6 },
-              ]}
-              onPress={() => handleAcceptRequest(item as FollowRequest)}
+              style={[styles.addBtn, { backgroundColor: "#6366f1" }]}
+              activeOpacity={0.85}
+              onPress={() =>
+                setNotification({
+                  type: "success",
+                  message: `Open chat with ${user.name || user.username}`,
+                })
+              }
+            >
+              <Icon name="chat" size={18} color="#F9FAFB" />
+              <Text style={styles.addBtnText}>Chat</Text>
+            </TouchableOpacity>
+          ) : user.requestSent ? (
+            <TouchableOpacity
+              style={[styles.addBtn, { backgroundColor: "#9CA3AF" }]}
+              activeOpacity={0.85}
+              onPress={() => setShowRemoveModal({ user })}
               disabled={loadingActions === user._id}
             >
               <Icon name="check" size={18} color="#F9FAFB" />
-              <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Accept"}</Text>
+              <Text style={styles.addBtnText}>
+                {loadingActions === user._id ? "..." : "Added"}
+              </Text>
             </TouchableOpacity>
+          ) : user.requestIncoming ? (
             <TouchableOpacity
-              activeOpacity={0.7}
-              style={[styles.addBtn, { backgroundColor: loadingActions === user._id ? "#d1d5db" : "#EF4444" }]}
-              onPress={() => handleRejectRequest(item as FollowRequest)}
+              style={[styles.addBtn, { backgroundColor: "#22C55E" }]}
+              activeOpacity={0.85}
+              onPress={() =>
+                handleAcceptRequest({
+                  user: user as any,
+                  requestedAt: new Date().toISOString(),
+                } as FollowRequest)
+              }
               disabled={loadingActions === user._id}
             >
-              <Icon name="close" size={18} color="#F9FAFB" />
-              <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Reject"}</Text>
+              <Icon name="account-arrow-left" size={18} color="#F9FAFB" />
+              <Text style={styles.addBtnText}>
+                {loadingActions === user._id ? "..." : "Accept"}
+              </Text>
             </TouchableOpacity>
-          </View>
-        ) : user.isFriend ? (
-          <TouchableOpacity
-            style={[styles.addBtn, { backgroundColor: "#6366f1" }]}
-            activeOpacity={0.85}
-            onPress={() => setNotification({ type: "success", message: `Open chat with ${user.name || user.username}` })}
-          >
-            <Icon name="chat" size={18} color="#F9FAFB" />
-            <Text style={styles.addBtnText}>Chat</Text>
-          </TouchableOpacity>
-        ) : user.requestSent ? (
-          <TouchableOpacity
-            style={[styles.addBtn, { backgroundColor: "#9CA3AF" }]}
-            activeOpacity={0.85}
-            onPress={() => setShowRemoveModal({ user })}
-            disabled={loadingActions === user._id}
-          >
-            <Icon name="check" size={18} color="#F9FAFB" />
-            <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Added"}</Text>
-          </TouchableOpacity>
-        ) : user.requestIncoming ? (
-          <TouchableOpacity
-            style={[styles.addBtn, { backgroundColor: "#22C55E" }]}
-            activeOpacity={0.85}
-            onPress={() =>
-              handleAcceptRequest({
-                user: user as any,
-                requestedAt: new Date().toISOString(),
-              } as FollowRequest)
-            }
-            disabled={loadingActions === user._id}
-          >
-            <Icon name="account-arrow-left" size={18} color="#F9FAFB" />
-            <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Accept"}</Text>
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity
-            activeOpacity={0.85}
-            style={styles.addBtn}
-            onPress={() => handleAddFriend(user)}
-            disabled={loadingActions === user._id}
-          >
-            <Icon name="account-plus-outline" size={18} color="#F9FAFB" />
-            <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Add"}</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-    );
+          ) : (
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={styles.addBtn}
+              onPress={() => handleAddFriend(user)}
+              disabled={loadingActions === user._id}
+            >
+              <Icon name="account-plus-outline" size={18} color="#F9FAFB" />
+              <Text style={styles.addBtnText}>
+                {loadingActions === user._id ? "..." : "Add"}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      );
   };
 
   const requestListToShow = showAllRequests ? friendRequests : friendRequests.slice(0, 3);
@@ -574,7 +632,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     marginBottom: 18,
   },
-  searchInput: { flex: 1, color: "#E5E7EB", fontSize: 14 },
+  searchInput: { flex: 1, color: "#E5E7EB", fontSize: 12 },
   sectionHeader: { marginBottom: 10 },
   sectionTitle: { fontSize: 16, fontWeight: "700", color: "#F9FAFB" },
   sectionHint: { fontSize: 12, color: "#9CA3AF", marginTop: 2 },
@@ -626,6 +684,12 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { marginTop: 10, fontSize: 15, fontWeight: "600", color: "#E5E7EB" },
   emptyText: { marginTop: 4, fontSize: 12, color: "#9CA3AF", textAlign: "center" },
+  userClickable: {
+    flexDirection: "row",
+    alignItems: "center",
+    flex: 1,
+    marginRight: 10,
+  },
 });
 
 export default Friends;

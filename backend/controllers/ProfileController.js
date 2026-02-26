@@ -4,6 +4,10 @@ import validator from "validator";
 import catchAsyncErrors from "../utils/catchAsyncErrors.js";
 import ErrorHandler from "../utils/errorHandler.js";
 import { sendVerificationEmail } from "./OtpController.js";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import multer from "multer";
 
 // Helper: extract avatarId from a models.readyplayer.me GLB URL
 const extractAvatarId = (url) => {
@@ -42,16 +46,30 @@ export const getProfile = catchAsyncErrors(async (req, res, next) => {
 
 // Edit profile (NO email update!)
 export const editProfile = catchAsyncErrors(async (req, res, next) => {
-  const { name, username, avatar, currentTitle } = req.body;
+  const { name, username, avatar, currentTitle, isPublic } = req.body;
+
   const update = {};
+
   if (name) update.name = name;
+
   if (username) {
     const exists = await User.findOne({ username, _id: { $ne: req.user._id } });
     if (exists) return next(new ErrorHandler("Username already exists", 400));
     update.username = username;
   }
+
   if (avatar) update.avatar = avatar;
   if (currentTitle) update.currentTitle = currentTitle;
+
+  // ✅ NEW: allow toggling location visibility / public profile flag
+  // isPublic === true  -> show location publicly
+  // isPublic === false -> friends only
+  if (typeof isPublic === "boolean") {
+    update.isPublic = isPublic;
+  } else if (isPublic === "true" || isPublic === "false") {
+    // if coming from form-data / string
+    update.isPublic = isPublic === "true";
+  }
 
   const user = await User.findByIdAndUpdate(req.user._id, update, { new: true }).select("-password");
   res.status(200).json({ success: true, user });
@@ -228,8 +246,33 @@ export const updateAppSettings = catchAsyncErrors(async (req, res, next) => {
 });
 
 // Delete account
+// Delete account with OTP
 export const deleteAccount = catchAsyncErrors(async (req, res, next) => {
+  const { otp } = req.body;
+  if (!otp) return next(new ErrorHandler("OTP required", 400));
+
+  const user = await User.findById(req.user._id);
+  if (!user) return next(new ErrorHandler("User not found", 404));
+
+  if (
+    !user.deleteAccountOtp ||
+    !user.deleteAccountOtpExpire ||
+    user.deleteAccountOtpExpire < Date.now()
+  ) {
+    user.deleteAccountOtp = undefined;
+    user.deleteAccountOtpExpire = undefined;
+    await user.save();
+    return next(new ErrorHandler("OTP invalid or expired. Request again.", 400));
+  }
+
+  const hashed = crypto.createHash("sha256").update(otp).digest("hex");
+  if (hashed !== user.deleteAccountOtp) {
+    return next(new ErrorHandler("Incorrect OTP", 400));
+  }
+
+  // OTP matched: Delete user
   await User.findByIdAndDelete(req.user._id);
+
   res.status(200).json({ success: true, message: "Account deleted" });
 });
 
@@ -393,5 +436,101 @@ export const getLocationLockStatus = catchAsyncErrors(async (req, res, next) => 
     locationLockUntil: lockUntil,
     country: user.country,
     city: user.city,
+  });
+});
+
+// 1. Prepare the directory for file uploads
+const AVATAR_DIR = path.join(os.homedir(), "uploads", "avatars");
+
+// auto-create folder if missing
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
+
+// multer storage
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, AVATAR_DIR),
+
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname) || ".jpg";
+    cb(null, req.user._id + "_" + Date.now() + ext);
+  },
+});
+
+export const upload = multer({ storage });
+
+// 3. Controller: Upload avatar and save path to user
+export const uploadAvatar = catchAsyncErrors(async (req, res, next) => {
+  if (!req.file) return next(new ErrorHandler("No file uploaded", 400));
+  
+  console.log(req.file);
+  const avatarUrl = `/avatars/${req.file.filename}`;
+  console.log(avatarUrl);
+  // Optionally delete previous avatar here (recommended for cleanup!)
+  await User.findByIdAndUpdate(
+    req.user._id,
+    { avatarUrl },
+    { new: true }
+  );
+  res.json({ success: true, url: avatarUrl });
+});
+
+// 4. Controller: Get current avatar of a user (by auth)
+export const getMyAvatar = catchAsyncErrors(async (req, res, next) => {
+  const user = await User.findById(req.user._id).select("avatarUrl");
+  if (!user) return next(new ErrorHandler("User not found", 404));
+  res.json({ success: true, avatarUrl: user.avatarUrl });
+});
+
+// controllers/avatarController.js
+export const getUserProfile = catchAsyncErrors(async (req, res, next) => {
+  const { userId } = req.params;
+  const user = await User.findById(userId).select("name username avatarUrl");
+  if (!user) return next(new ErrorHandler("User not found", 404));
+  res.json({ success: true, user });
+});
+
+// DELETE avatar for current user
+export const deleteAvatar = catchAsyncErrors(async (req, res, next) => {
+  const user = await User.findById(req.user._id).select("avatarUrl");
+  if (!user) return next(new ErrorHandler("User not found", 404));
+
+  // // Remove file from disk if there is an avatar
+  // if (user.avatarUrl) {
+  //   // Remove leading slash if present
+  //   const filePath = user.avatarUrl.startsWith("/")
+  //     ? user.avatarUrl.slice(1)
+  //     : user.avatarUrl;
+
+  //   // Full path (relative to your project root)
+  //   const absoluteFilePath = path.join(process.cwd(), filePath);
+  //   fs.unlink(absoluteFilePath, (err) => {
+  //     // ignore error (file might not exist)
+  //   });
+  // }
+
+  // Remove avatarUrl reference in db
+  user.avatarUrl = undefined;
+  await user.save();
+
+  res.json({ success: true, message: "Avatar removed." });
+});
+
+// Request OTP for account deletion
+export const requestDeleteAccountOtp = catchAsyncErrors(async (req, res, next) => {
+  const user = await User.findById(req.user._id);
+  if (!user) return next(new ErrorHandler("User not found", 404));
+
+  // Generate OTP (6 digits)
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const hashed = crypto.createHash("sha256").update(otp).digest("hex");
+
+  user.deleteAccountOtp = hashed;
+  user.deleteAccountOtpExpire = Date.now() + 5 * 60 * 1000; // 5 minutes
+
+  await sendVerificationEmail(user.email, otp);
+  await user.save();
+
+  res.status(200).json({
+    success: true,
+    message: "OTP sent to your registered email address for account deletion."
   });
 });

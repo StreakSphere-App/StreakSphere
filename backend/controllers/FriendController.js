@@ -1,5 +1,6 @@
 import User from "../models/UserSchema.js";
 import catchAsyncErrors from "../utils/catchAsyncErrors.js";
+import Mood from "../models/MoodSchema.js";
 
 /**
  * Helpers
@@ -135,7 +136,7 @@ export const friendStatus = catchAsyncErrors(async (req, res) => {
 export const listFriends = catchAsyncErrors(async (req, res) => {
   const currentUserId = req.user.id;
   const me = await User.findById(currentUserId)
-    .populate("friends.user", "name username avatar")
+    .populate("friends.user", "name username avatarUrl")
     .lean();
   if (!me) return res.status(404).json({ message: "User not found" });
 
@@ -145,7 +146,7 @@ export const listFriends = catchAsyncErrors(async (req, res) => {
       _id: f.user._id,
       name: f.user.name,
       username: f.user.username,
-      avatar: f.user.avatar,
+      avatar: f.user.avatarUrl,
       since: f.since,
     }));
 
@@ -158,7 +159,7 @@ export const listFriends = catchAsyncErrors(async (req, res) => {
 export const pendingFriendRequests = catchAsyncErrors(async (req, res) => {
   const currentUserId = req.user.id;
   const me = await User.findById(currentUserId)
-    .populate("friendRequests.user", "name username avatar")
+    .populate("friendRequests.user", "name username avatarUrl")
     .lean();
   if (!me) return res.status(404).json({ message: "User not found" });
 
@@ -167,7 +168,7 @@ export const pendingFriendRequests = catchAsyncErrors(async (req, res) => {
       _id: r.user?._id,
       name: r.user?.name,
       username: r.user?.username,
-      avatar: r.user?.avatar,
+      avatar: r.user?.avatarUrl,
       requestedAt: r.requestedAt,
     })),
   });
@@ -186,7 +187,7 @@ export const searchUsers = catchAsyncErrors(async (req, res) => {
     _id: { $ne: currentUserId },
     $or: [{ username: searchRegex }, { name: searchRegex }],
   })
-    .select("name username avatar friendRequests friends")
+    .select("name username avatarUrl friendRequests friends")
     .lean();
 
   const me = await User.findById(currentUserId).select("friendRequests friends").lean();
@@ -198,7 +199,7 @@ export const searchUsers = catchAsyncErrors(async (req, res) => {
       _id: u._id,
       name: u.name,
       username: u.username,
-      avatar: u.avatar,
+      avatar: u.avatarUrl,
       isFriend: friend,
       requestSent,
       requestIncoming: incoming,
@@ -221,7 +222,7 @@ export const suggestedFriends = catchAsyncErrors(async (req, res) => {
   const excludeIds = [currentUserId, ...(me.friends || []).map(f => String(f.user))];
 
   let users = await User.find({ _id: { $nin: excludeIds } })
-    .select("name username avatar friendRequests friends")
+    .select("name username avatarUrl friendRequests friends")
     .limit(limit)
     .lean();
 
@@ -233,7 +234,7 @@ export const suggestedFriends = catchAsyncErrors(async (req, res) => {
       _id: u._id,
       name: u.name,
       username: u.username,
-      avatar: u.avatar,
+      avatar: u.avatarUrl,
       isFriend: friend,
       requestSent,
       requestIncoming: incoming,
@@ -242,4 +243,79 @@ export const suggestedFriends = catchAsyncErrors(async (req, res) => {
 
   const shuffled = users.sort(() => 0.5 - Math.random());
   res.status(200).json({ suggestions: shuffled });
+});
+
+export const previewProfile = catchAsyncErrors(async (req, res) => {
+  const currentUserId = req.user.id;
+  const { userId } = req.params;
+
+  const target = await User.findById(userId)
+    .select("name username avatarUrl avatarThumbnailUrl level currentTitle country city isPublic")
+    .lean();
+
+  if (!target) return res.status(404).json({ message: "User not found" });
+
+  const me = await User.findById(currentUserId)
+    .select("friends friendRequests")
+    .lean();
+
+  const isFriendFlag = me ? isFriend(me, userId) : false;
+
+  // I sent request to them (they have my id in their friendRequests)
+  const requestSent = await User.exists({
+    _id: userId,
+    "friendRequests.user": currentUserId,
+  });
+
+  // they sent request to me (I have their id in my friendRequests)
+  const requestIncoming = me?.friendRequests?.some(
+    (r) => String(r.user) === String(userId)
+  );
+
+  // Location visibility policy:
+  // - public accounts share location to everyone
+  // - friends share location to each other
+  const canSeeLocation = target.isPublic === true || isFriendFlag;
+
+  // Latest active (non-expired) mood
+  const now = new Date();
+  const moodDoc = await Mood.findOne({
+    user: userId,
+    expiresAt: { $gt: now },
+  })
+    .sort({ createdAt: -1 })
+    .select("mood createdAt expiresAt")
+    .lean();
+
+  res.json({
+    user: {
+      _id: target._id,
+      name: target.name,
+      username: target.username,
+      avatarUrl: target.avatarUrl,
+      avatarThumbnailUrl: target.avatarThumbnailUrl,
+
+      level: target.level,
+      title: target.currentTitle || "",
+
+      // only show if allowed
+      country: canSeeLocation ? target.country || "" : "",
+      city: canSeeLocation ? target.city || "" : "",
+
+      // mood can be treated as public or follow same rule; you decide.
+      // Here: mood is shown to everyone if it exists.
+      mood: moodDoc?.mood || "",
+      moodCreatedAt: moodDoc?.createdAt || null,
+      moodExpiresAt: moodDoc?.expiresAt || null,
+
+      // share setting
+      isPublic: !!target.isPublic,
+      canSeeLocation,
+    },
+    friendship: {
+      isFriend: isFriendFlag,
+      requestSent: !!requestSent,
+      requestIncoming: !!requestIncoming,
+    },
+  });
 });

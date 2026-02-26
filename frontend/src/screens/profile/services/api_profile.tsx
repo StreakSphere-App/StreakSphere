@@ -138,7 +138,7 @@ const updateAppSettings = async (settings: object) => {
 // Delete Account (CAREFUL)
 const deleteAccount = async () => {
   try {
-    return await client.delete<object>('/profile/delete');
+    return await client.post<object>('/profile/request-delete');
   } catch (error: any) {
     if (!error.response) throw new Error('Server is offline, try again later.');
     throw error;
@@ -171,6 +171,39 @@ const updateAvatarUrl = async (avatarUrl: string, avatarMetadata?: any) => {
   return client.post('/profile/me/avatar-url', { avatarUrl, avatarMetadata });
 };
 
+const updateAvatarImage = async (formData: FormData) => {
+  try {
+    // Adjust the URL to match your backend route!
+    return await client.post<object>(
+      '/profile/me/avatar-url', // Or '/profile/upload-avatar' or as set in backend!
+      formData,
+      {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      }
+    );
+  } catch (error: any) {
+    if (!error.response) throw new Error('Server is offline, try again later.');
+    throw error;
+  }
+};
+
+const deleteAvatar = async () => {
+  return client.delete('/profile/me/delete-avatar');
+};
+
+// Delete Account WITH OTP
+const deleteAccountWithOtp = async (otp: string) => {
+  try {
+    return await client.post<object>('/profile/delete', { otp });
+  } catch (error: any) {
+    if (!error.response) throw new Error('Server is offline, try again later.');
+    throw error;
+  }
+};
+
+
 export default {
   getProfile,
   editProfile,
@@ -189,5 +222,8 @@ export default {
   getAvatar,
   updateAvatar,
   getAvatarUrl,
-  updateAvatarUrl
+  updateAvatarUrl,
+  updateAvatarImage,
+  deleteAvatar,
+  deleteAccountWithOtp
 };
