@@ -1,11 +1,5 @@
 #!/bin/bash
 
-# =====================================
-# StreakSphere Deployment Script
-# Usage: ./deploy.sh [development|production]
-# Default: production
-# =====================================
-
 ENV=${1:-production}
 BASE_PATH="/home/server-pc/actions-runner/_work/StreakSphere/StreakSphere"
 NODE_BACKEND_PATH="$BASE_PATH/backend"
@@ -13,55 +7,92 @@ AI_PATH="$BASE_PATH/ai"
 APP_NAME="StreakSphere"
 
 echo "🚀 Deploying $APP_NAME in $ENV mode..."
+echo "-----------------------------------------"
 
 # -------------------------------------
-# 1️⃣ Reset PM2 completely
+# 1️⃣ Install backend dependencies
 # -------------------------------------
-# echo "⏹ Resetting PM2..."
-# pm2 delete all >/dev/null 2>&1 || true
-# sleep 2
+cd "$NODE_BACKEND_PATH" || {
+    echo "❌ Backend folder not found!"
+    exit 1
+}
 
-# -------------------------------------
-# 2️⃣ Install backend dependencies
-# -------------------------------------
-cd "$NODE_BACKEND_PATH" || { echo "❌ Backend folder not found!"; exit 1; }
 echo "📦 Installing backend dependencies..."
 npm install --legacy-peer-deps
 
 # -------------------------------------
-# 3️⃣ Start Backend
+# 2️⃣ Restart backend
 # -------------------------------------
+echo "🔄 Restarting Backend..."
+
+pm2 delete "$APP_NAME-dev" >/dev/null 2>&1 || true
+pm2 delete "$APP_NAME-prod" >/dev/null 2>&1 || true
+
 if [ "$ENV" == "development" ]; then
-    echo "🟢 Starting Development Backend..."
-    pm2 start server-dev.js \
-        --name "$APP_NAME-dev" \
-        --watch
+    pm2 start server-dev.js --name "$APP_NAME-dev" -i max
 else
-    echo "🔵 Starting Production Backend (cluster mode)..."
-    pm2 start server-prod.js \
-        --name "$APP_NAME-prod" \
-        -i max
+    pm2 start server-prod.js --name "$APP_NAME-prod" -i max
 fi
 
 # -------------------------------------
-# 4️⃣ Start AI Model
+# 3️⃣ Prepare AI Environment
 # -------------------------------------
-if [ "$ENV" == "development" ]; then
-    echo "🤖 Starting AI Model (development)..."
-    pm2 start "$AI_PATH/main.py" \
-        --name "$APP_NAME-ai" \
-        --interpreter python3
+cd "$AI_PATH" || {
+    echo "❌ AI folder not found!"
+    exit 1
+}
+
+echo "🐍 Preparing Python environment..."
+
+# Create venv if not exists
+if [ ! -d "venv" ]; then
+    echo "📦 Creating virtual environment..."
+    python3 -m venv venv
+fi
+
+# Upgrade pip
+./venv/bin/pip install --upgrade pip
+
+# Detect GPU
+echo "🔍 Checking for GPU..."
+if ./venv/bin/python -c "import torch; exit(0)"; then
+    echo "⚠️ Torch already installed, skipping torch install."
 else
-    echo "🤖 Starting AI Model (production cluster)..."
-    pm2 start "$AI_PATH/main.py" \
-        --name "$APP_NAME-ai" \
-        --interpreter python3 \
-        -i max
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        echo "🔥 GPU detected. Installing CUDA PyTorch..."
+        ./venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+    else
+        echo "💻 No GPU detected. Installing CPU PyTorch..."
+        ./venv/bin/pip install torch torchvision
+    fi
+fi
+
+# Install remaining requirements
+if [ -f "requirements.txt" ]; then
+    echo "📦 Installing AI dependencies..."
+    ./venv/bin/pip install -r requirements.txt
 fi
 
 # -------------------------------------
-# 5️⃣ Save PM2 state
+# 4️⃣ Restart AI Model
+# -------------------------------------
+echo "🔄 Restarting AI Model..."
+
+pm2 delete "$APP_NAME-ai" >/dev/null 2>&1 || true
+
+# Kill anything using port 8000
+sudo fuser -k 8000/tcp >/dev/null 2>&1 || true
+
+pm2 start ./venv/bin/python \
+    --name "$APP_NAME-ai" \
+    --cwd "$AI_PATH" \
+    -- -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
+
+# -------------------------------------
+# 5️⃣ Save PM2 State
 # -------------------------------------
 pm2 save >/dev/null 2>&1
 
+echo "-----------------------------------------"
 echo "✅ Deployment completed successfully."
+pm2 status

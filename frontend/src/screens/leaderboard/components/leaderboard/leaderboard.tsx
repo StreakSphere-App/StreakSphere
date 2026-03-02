@@ -7,11 +7,14 @@ import {
   ActivityIndicator,
   Platform,
   Modal,
+  Image,
 } from "react-native";
 import { Text } from "@rneui/themed";
 import { useFocusEffect } from "@react-navigation/native";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
 import { Country, City } from "country-state-city";
+import NetInfo from "@react-native-community/netinfo";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import {
   getMonthlyLeaderboard,
@@ -20,6 +23,7 @@ import {
   getLocationLockStatus,
 } from "../../services/api_leaderboard";
 import MainLayout from "../../../../shared/components/MainLayout";
+import apiClient from "../../../../auth/api-client/api_client";
 
 const scopes: Array<{ key: "world" | "country" | "city" | "friends"; label: string }> = [
   { key: "world", label: "World Rank" },
@@ -33,7 +37,31 @@ const tabs = [
   { key: "permanent", label: "All-time" },
 ];
 
-const LeaderboardScreen = () => {
+    const baseUrl = apiClient.getBaseURL();
+  const newUrl = baseUrl.replace(/\/api\/?$/, "");
+
+const RowAvatar = ({ url }: { url?: string }) => {
+  const [imgError, setImgError] = useState(false);
+  
+
+  if (url && !imgError) {
+    return (
+      <Image
+        source={{ uri: newUrl + url }}
+        style={styles.rowAvatar}
+        onError={() => setImgError(true)}
+      />
+    );
+  }
+
+  return (
+    <View style={styles.rowAvatarFallback}>
+      <Icon name="account" size={16} color="#cbd5e1" />
+    </View>
+  );
+};
+
+const LeaderboardScreen = ({ navigation }: any) => {
   const [tab, setTab] = useState<"monthly" | "permanent">("monthly");
   const [scope, setScope] = useState<"world" | "country" | "city" | "friends">("world");
   const [data, setData] = useState<any>(null);
@@ -41,40 +69,81 @@ const LeaderboardScreen = () => {
   const [savingLocation, setSavingLocation] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Location edit state
   const [editLocation, setEditLocation] = useState(false);
   const [selectedCountryCode, setSelectedCountryCode] = useState<string | undefined>(undefined);
   const [selectedCity, setSelectedCity] = useState<string | undefined>(undefined);
   const [countryOptions, setCountryOptions] = useState<{ label: string; value: string }[]>([]);
   const [cityOptions, setCityOptions] = useState<{ label: string; value: string }[]>([]);
 
-  // Lock status from backend
   const [lockStatus, setLockStatus] = useState<{
     locked: boolean;
     daysLeft: number;
     locationLockUntil: string | null;
   }>({ locked: false, daysLeft: 0, locationLockUntil: null });
 
-  // Confirmation modal
   const [showConfirm, setShowConfirm] = useState(false);
-
-  // Rules modal
   const [showRules, setShowRules] = useState(false);
 
-  // Monthly reset countdown
+        const baseUrl = apiClient.getBaseURL();
+  const newUrl = baseUrl.replace(/\/api\/?$/, "");
+
   const [timeLeft, setTimeLeft] = useState<string>("--:--:--");
   const [daysLeftUntilReset, setDaysLeftUntilReset] = useState<number>(0);
 
-  // Derived lock state
   const isLocationLocked = !!lockStatus.locked;
   const lockMessage = isLocationLocked
     ? `You can change your location again in ${lockStatus.daysLeft} day(s).`
     : null;
 
-  // Keep latest currentUser without re-rendering load callback
-  const currentUserRef = useRef<any>(null);
+  const [dataSource, setDataSource] = useState<"live" | "cache" | null>(null);
 
-  // Load country list once
+  const currentUserRef = useRef<any>(null);
+  const LB_CACHE_PREFIX = "leaderboard:v2";
+  const LOCK_CACHE_KEY = "leaderboard:lockStatus:v1";
+
+  const cacheKeyForLeaderboard = (
+    tab: "monthly" | "permanent",
+    scope: "world" | "country" | "city" | "friends",
+    country?: string,
+    city?: string
+  ) => {
+    const c = (country || "").trim().toLowerCase();
+    const ci = (city || "").trim().toLowerCase();
+    return `${LB_CACHE_PREFIX}:${tab}:${scope}:${c}:${ci}`;
+  };
+
+  const saveCache = async (key: string, value: any) => {
+    try {
+      await AsyncStorage.setItem(key, JSON.stringify({ ts: Date.now(), value }));
+    } catch (e) {
+      console.log("saveCache error", e);
+    }
+  };
+
+  const loadCache = async <T,>(key: string): Promise<{ ts: number; value: T } | null> => {
+    try {
+      const raw = await AsyncStorage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed?.value) return null;
+      return { ts: parsed.ts ?? 0, value: parsed.value as T };
+    } catch (e) {
+      console.log("loadCache error", e);
+      return null;
+    }
+  };
+
+  const [offline, setOffline] = useState(false);
+
+  useEffect(() => {
+    const unsub = NetInfo.addEventListener((state) => {
+      const connected = state.isConnected === true;
+      const reachable = state.isInternetReachable === true;
+      setOffline(!connected || !reachable);
+    });
+    return () => unsub();
+  }, []);
+
   useEffect(() => {
     const list = Country.getAllCountries().map((c) => ({
       label: c.name,
@@ -93,7 +162,6 @@ const LeaderboardScreen = () => {
     setSelectedCity(cityToSelect ?? undefined);
   };
 
-  // Prefill country/city from currentUser when data loads
   const prefillFromCurrentUser = useCallback(() => {
     if (!data?.currentUser || countryOptions.length === 0) return;
     const cu = data.currentUser;
@@ -116,18 +184,36 @@ const LeaderboardScreen = () => {
   }, [prefillFromCurrentUser]);
 
   const loadLockStatus = useCallback(async () => {
+    const cached = await loadCache<{
+      locked: boolean;
+      daysLeft: number;
+      locationLockUntil: string | null;
+    }>(LOCK_CACHE_KEY);
+
+    if (cached?.value) {
+      setLockStatus(cached.value);
+    }
+
+    if (offline) return;
+
     try {
       const res = await getLocationLockStatus();
       const payload = res.data;
-      setLockStatus({
+
+      const next = {
         locked: !!payload.locked,
         daysLeft: payload.daysLeft ?? 0,
         locationLockUntil: payload.locationLockUntil || null,
-      });
+      };
+
+      setLockStatus(next);
+      await saveCache(LOCK_CACHE_KEY, next);
     } catch {
-      setLockStatus({ locked: false, daysLeft: 0, locationLockUntil: null });
+      if (!cached?.value) {
+        setLockStatus({ locked: false, daysLeft: 0, locationLockUntil: null });
+      }
     }
-  }, []);
+  }, [offline]);
 
   const resolveCountryCityParams = () => {
     if (scope === "country" || scope === "city") {
@@ -146,36 +232,66 @@ const LeaderboardScreen = () => {
   const load = useCallback(async () => {
     setLoading(true);
     setErrorMsg(null);
+
+    const { country, city } = resolveCountryCityParams();
+
+    if ((scope === "country" || scope === "city") && !country) {
+      setLoading(false);
+      setErrorMsg("Please set your country first to view this leaderboard.");
+      return;
+    }
+    if (scope === "city" && !city) {
+      setLoading(false);
+      setErrorMsg("Please set your city to view the city leaderboard.");
+      return;
+    }
+
+    const key = cacheKeyForLeaderboard(tab, scope, country, city);
+    const cached = await loadCache<any>(key);
+
+    if (cached?.value) {
+      currentUserRef.current = cached.value?.currentUser || null;
+      setData(cached.value);
+      setDataSource("cache");
+    }
+
+    if (offline) {
+      if (!cached?.value) {
+        setData(null);
+        setErrorMsg("You are offline and no cached leaderboard is available yet.");
+      }
+      setLoading(false);
+      return;
+    }
+
     try {
       const api = tab === "monthly" ? getMonthlyLeaderboard : getPermanentLeaderboard;
-      const { country, city } = resolveCountryCityParams();
-
-      if ((scope === "country" || scope === "city") && !country) {
-        setErrorMsg("Please set your country first to view this leaderboard.");
-        setLoading(false);
-        return;
-      }
-      if (scope === "city" && !city) {
-        setErrorMsg("Please set your city to view the city leaderboard.");
-        setLoading(false);
-        return;
-      }
-
       const res = await api(scope, country, city);
-      currentUserRef.current = res.data?.currentUser || null;
-      setData(res.data);
+      const payload = res.data;
+
+      currentUserRef.current = payload?.currentUser || null;
+      setData(payload);
+      setDataSource("live");
+
+      await saveCache(key, payload);
     } catch (e: any) {
-      setData(null);
-      setErrorMsg(e?.response?.data?.message || e?.message || "Failed to load leaderboard");
+      if (!cached?.value) {
+        setData(null);
+        setErrorMsg(e?.response?.data?.message || e?.message || "Failed to load leaderboard");
+      } else {
+        setErrorMsg("Showing cached leaderboard (network error).");
+      }
     } finally {
       setLoading(false);
     }
-  }, [tab, scope, selectedCountryCode, selectedCity, countryOptions]);
+  }, [tab, scope, offline, selectedCountryCode, selectedCity, countryOptions]);
+
+  useEffect(() => {
+    load();
+  }, [offline, load]);
 
   useFocusEffect(
     useCallback(() => {
-      setData(null);
-      setErrorMsg(null);
       (async () => {
         await loadLockStatus();
         await load();
@@ -183,14 +299,12 @@ const LeaderboardScreen = () => {
     }, [load, loadLockStatus])
   );
 
-  // Re-run when scope or tab changes
   useEffect(() => {
     (async () => {
       await load();
     })();
   }, [scope, tab, load]);
 
-  // Monthly reset countdown (UTC)
   useEffect(() => {
     if (tab !== "monthly") return;
     const calc = () => {
@@ -255,25 +369,51 @@ const LeaderboardScreen = () => {
   };
 
   const renderRow = ({ item }: any) => (
-    <View style={styles.row}>
-      <View style={{ flexDirection: "row", alignItems: "center" }}>
+    <TouchableOpacity
+      activeOpacity={0.85}
+      onPress={() => {
+        const id = String(item.userId || item._id || "");
+        if (!id) return;
+
+        navigation.navigate("ProfilePreview", {
+          userId: id,
+          name: item.name || item.username,
+          username: item.username,
+        });
+      }}
+      style={styles.row}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", flex: 1, marginRight: 10 }}>
         <Text style={styles.rank}>{item.rank}</Text>
-        <View>
-          <Text style={styles.name}>{item.name || item.username}</Text>
-          <Text style={styles.sub}>
+
+        <RowAvatar
+          url={
+            item.avatarUrl || ""
+          }
+        />
+
+        <View style={{ marginLeft: 10, flex: 1 }}>
+          <Text style={styles.name} numberOfLines={1}>
+            {item.name || item.username}
+          </Text>
+          <Text style={styles.sub} numberOfLines={1}>
             {item.title ? `${item.title} (Lv ${item.level})` : `Lv ${item.level}`}
           </Text>
         </View>
       </View>
+
       <View style={{ alignItems: "flex-end" }}>
-        <Text style={styles.xpLabel}>{tab === "monthly" ? "Monthly XP" : "Total XP"}</Text>
-        <Text style={styles.xpValue}>{tab === "monthly" ? item.monthlyXp : item.xp}</Text>
+        <Text style={styles.xpLabel}>
+          {tab === "monthly" ? "Monthly XP" : "Total XP"}
+        </Text>
+        <Text style={styles.xpValue}>
+          {tab === "monthly" ? item.monthlyXp : item.xp}
+        </Text>
       </View>
-    </View>
+    </TouchableOpacity>
   );
 
   const renderSeparator = () => <View style={styles.separator} />;
-
   const currentUser = data?.currentUser;
 
   const handleScopeSelect = (newScope: "world" | "country" | "city" | "friends") => {
@@ -284,7 +424,6 @@ const LeaderboardScreen = () => {
   return (
     <MainLayout>
       <View style={styles.root}>
-        {/* Background & glows */}
         <View style={styles.baseBackground} />
         <View style={styles.glowTop} />
         <View style={styles.glowBottom} />
@@ -297,7 +436,6 @@ const LeaderboardScreen = () => {
             </TouchableOpacity>
           </View>
 
-          {/* Tabs */}
           <View style={styles.tabs}>
             {tabs.map((t, i) => (
               <TouchableOpacity
@@ -314,7 +452,6 @@ const LeaderboardScreen = () => {
             ))}
           </View>
 
-          {/* Scopes */}
           <View style={styles.scopes}>
             {scopes.map((s) => (
               <TouchableOpacity
@@ -329,7 +466,6 @@ const LeaderboardScreen = () => {
             ))}
           </View>
 
-          {/* Monthly reset info */}
           {tab === "monthly" && (
             <View style={styles.resetCard}>
               <Text style={styles.resetTitle}>Monthly reset timer (UTC 00:00)</Text>
@@ -337,7 +473,6 @@ const LeaderboardScreen = () => {
             </View>
           )}
 
-          {/* Location setup / display */}
           <View style={styles.locationCard}>
             <View style={styles.locationHeaderRow}>
               <Text style={styles.locationTitle}>
@@ -366,7 +501,6 @@ const LeaderboardScreen = () => {
               <>
                 {isLocationLocked && <Text style={styles.lockText}>{lockMessage}</Text>}
 
-                {/* Country dropdown */}
                 <View style={styles.dropdownRow}>
                   <Text style={styles.dropdownLabel}>Country</Text>
                   <View style={styles.dropdownBox}>
@@ -392,7 +526,6 @@ const LeaderboardScreen = () => {
                   </View>
                 </View>
 
-                {/* City dropdown (only after country is picked) */}
                 {selectedCountryCode && (
                   <View style={styles.dropdownRow}>
                     <Text style={styles.dropdownLabel}>City</Text>
@@ -439,7 +572,6 @@ const LeaderboardScreen = () => {
             )}
           </View>
 
-          {/* Error glass card */}
           {errorMsg && (
             <View style={styles.errorCard}>
               <Text style={styles.errorTitle}>Something went wrong</Text>
@@ -481,7 +613,6 @@ const LeaderboardScreen = () => {
           )}
         </View>
 
-        {/* Confirmation Modal */}
         <Modal transparent visible={showConfirm} animationType="fade" onRequestClose={() => setShowConfirm(false)}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalCard}>
@@ -509,7 +640,6 @@ const LeaderboardScreen = () => {
           </View>
         </Modal>
 
-        {/* Rules Modal */}
         <Modal transparent visible={showRules} animationType="fade" onRequestClose={() => setShowRules(false)}>
           <View style={styles.modalOverlay}>
             <View style={styles.modalCard}>
@@ -635,7 +765,7 @@ const styles = StyleSheet.create({
   dropdownRow: { marginBottom: 8 },
   dropdownLabel: { color: "#cbd5e1", marginBottom: 4, fontWeight: "600", fontSize: 12 },
   dropdownBox: {
-    maxHeight: 180,
+    maxHeight: 145,
     backgroundColor: "rgba(17, 24, 39, 0.9)",
     borderRadius: 10,
     borderWidth: 1,
@@ -698,6 +828,26 @@ const styles = StyleSheet.create({
   },
   separator: { height: 8, backgroundColor: "transparent" },
   rank: { color: "#a855f7", fontSize: 16, fontWeight: "800", width: 30, marginRight: 10 },
+
+  rowAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.35)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  rowAvatarFallback: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.35)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
   name: { color: "#fff", fontSize: 15, fontWeight: "700" },
   sub: { color: "#94a3b8", fontSize: 12 },
   xpLabel: { color: "#94a3b8", fontSize: 11 },

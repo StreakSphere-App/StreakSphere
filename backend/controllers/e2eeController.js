@@ -212,11 +212,10 @@ export const storeMessage = async (req, res) => {
 
     if (
       String(req.user._id) !== String(toUserId) &&
-      req.body.notifyUser == true // Only true for the FIRST device upload per message
+      req.body.notifyUser == false // Only true for the FIRST device upload per message
     ) {
       const senderName = req.user?.name || req.user?.username || "Someone";
       await sendMsgNotification(toUserId, req.user._id, senderName);
-      console.log("PUSH SENT");
     }
     res.json({ success: true, count: inserted.length, ids: inserted.map((m) => m._id) });
   } catch (err) {

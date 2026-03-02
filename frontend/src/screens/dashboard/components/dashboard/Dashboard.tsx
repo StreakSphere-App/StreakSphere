@@ -14,6 +14,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { Text } from "@rneui/themed";
 import { AnimatedCircularProgress } from "react-native-circular-progress";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
+import Icon1 from "react-native-vector-icons/MaterialIcons";
 import NetInfo from "@react-native-community/netinfo";
 
 import MainLayout from "../../../../shared/components/MainLayout";
@@ -24,6 +25,10 @@ import DeviceInfo from "react-native-device-info";
 import { ensureDeviceKeys } from "../../../chat/services/bootstrap"; // adjust path
 import AuthContext from "../../../../auth/user/UserContext";
 import { getStableDeviceId } from "../../../../shared/services/stableDeviceId";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+const DASHBOARD_CACHE_KEY = "dashboard:summary:v1";
+const TODAY_HABITS_CACHE_KEY = "dashboard:todayHabits:v1";
 
 const GLASS_BG = "rgba(15, 23, 42, 0.65)";
 const GLASS_BORDER = "rgba(148, 163, 184, 0.35)";
@@ -64,7 +69,8 @@ const MOOD_METADATA: Record<
 };
 
 const Dashboard = ({ navigation }: any) => {
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true); // Only true for very first render
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false); // Did we ever load anything?
   const [offline, setOffline] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [friendReqCount, setFriendReqCount] = useState(0);
@@ -99,17 +105,62 @@ const Dashboard = ({ navigation }: any) => {
     createdAt: string;
   } | null>(null);
 
-  // NetInfo: connectivity listener
+  const saveCache = async (key: string, value: any) => {
+    try {
+      await AsyncStorage.setItem(key, JSON.stringify({ ts: Date.now(), value }));
+    } catch (e) {
+      console.log("saveCache error", e);
+    }
+  };
+  
+  const loadCache = async (key: string) => {
+    try {
+      const raw = await AsyncStorage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed?.value ?? null;
+    } catch (e) {
+      console.log("loadCache error", e);
+      return null;
+    }
+  };
+
+  // On first mount, load from cache, then background update but never set loading true again
+  useEffect(() => {
+    (async () => {
+      let anyLoaded = false;
+      const cached = await loadCache(DASHBOARD_CACHE_KEY);
+      if (cached) {
+        setProfile(cached.profile);
+        setSecondaryCards(cached.secondaryCards || null);
+        setCurrentMood(cached.currentMood || null);
+        anyLoaded = true;
+      }
+  
+      const cachedHabits = await loadCache(TODAY_HABITS_CACHE_KEY);
+      if (cachedHabits) {
+        setHabits(cachedHabits);
+        anyLoaded = true;
+      }
+      setHasLoadedOnce(anyLoaded);
+      setLoading(!anyLoaded);
+
+      // Background refresh right away, but not set loading
+      fetchDashboardInBackground();
+      fetchTodayHabitsInBackground();
+    })();
+    refreshPendingCount();
+    bootstrapKeys();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state) => {
       const isOffline =
         !state.isConnected || state.isInternetReachable === false;
       setOffline(isOffline);
     });
-
-    return () => {
-      unsubscribe();
-    };
+    return () => { unsubscribe(); };
   }, []);
 
   const refreshPendingCount = useCallback(async () => {
@@ -138,95 +189,68 @@ const Dashboard = ({ navigation }: any) => {
       }
     }, []);
 
-    useEffect(() => { refreshPendingCount(); }, [refreshPendingCount]);
-    useEffect(() => {
-      const bootstrapKeys = async () => {
-        try {
-          const deviceId = await getStableDeviceId(myUserId);
-          await ensureDeviceKeys(myUserId, deviceId);
-        } catch (e) {
-          console.log("ensureDeviceKeys error", e);
-        }
-      };
-      bootstrapKeys();
-    }, []);
-    useFocusEffect(useCallback(() => { refreshPendingCount(); }, [refreshPendingCount]));
-
-  const fetchTodayHabits = useCallback(async () => {
+  const bootstrapKeys = async () => {
     try {
-      const res = await DashboardService.GetTodayHabits(); // adjust base url
-      
-      if (res.data?.success) {
-        setHabits(res?.data.habits);
-      }
-    } catch (err: any) {
-      console.log("Error loading today habits", err);
-      const msg =
-      err?.response?.data?.message ||
-      err?.message ||
-      "Failed to load dashboard";
-    setError(msg);
+      const deviceId = await getStableDeviceId(myUserId);
+      await ensureDeviceKeys(myUserId, deviceId);
+    } catch (e) {
+      console.log("ensureDeviceKeys error", e);
     }
-  }, []);
+  };
 
-  const fetchDashboard = useCallback(async () => {
+  // These never set loading=true, only update UI in background
+  const fetchDashboardInBackground = useCallback(async () => {
     try {
-      setLoading(true);
       setError(null);
-
-      // Optional: early return if offline
-      if (offline) {
-        setLoading(false);
-        return;
-      }
-
+      if (offline) return;
       const res = await DashboardService.GetDashboardSummary();
-      
-      
       const responseData = (res as any).data ?? res;
-      if (!responseData.success) {
-        throw new Error(responseData.message || "Failed to load dashboard");
-      }
-
-     console.log(responseData.data);
-     
-
+      if (!responseData.success) throw new Error(responseData.message || "Failed to load dashboard");
       const { profile, secondaryCards, currentMood } = responseData.data;
       setProfile(profile);
       setSecondaryCards(secondaryCards || null);
       setCurrentMood(currentMood || null);
-
+      await saveCache(DASHBOARD_CACHE_KEY, responseData.data);
+      setHasLoadedOnce(true);
+      setLoading(false);
     } catch (err: any) {
-      console.error("Dashboard fetch error:", err?.message || err);
       const msg =
         err?.response?.data?.message ||
         err?.message ||
         "Failed to load dashboard";
       setError(msg);
-    } finally {
-      setLoading(false);
+    }
+  }, [offline]);
+
+  const fetchTodayHabitsInBackground = useCallback(async () => {
+    try {
+      if (offline) return;
+      const res = await DashboardService.GetTodayHabits();
+      if (res.data?.success) {
+        setHabits(res?.data.habits);
+        await saveCache(TODAY_HABITS_CACHE_KEY, res?.data.habits);
+        setHasLoadedOnce(true);
+      }
+    } catch (err: any) {
+      console.log("Error loading today habits", err);
     }
   }, [offline]);
 
   useFocusEffect(
     useCallback(() => {
-      fetchDashboard();
-     refreshPendingCount();
-    }, [fetchDashboard, refreshPendingCount])
-  );
-
-  useFocusEffect(
-    useCallback(() => {
-      fetchTodayHabits();
-    }, [fetchTodayHabits])
+      fetchDashboardInBackground();
+      refreshPendingCount();
+      fetchTodayHabitsInBackground();
+    }, [fetchDashboardInBackground, refreshPendingCount, fetchTodayHabitsInBackground])
   );
 
   const handleRetry = () => {
-    fetchDashboard();
-    fetchTodayHabits()
+    fetchDashboardInBackground();
+    fetchTodayHabitsInBackground();
   };
-  // Use skeleton instead of full-screen loader
-  if (loading) {
+
+  // Only show skeleton if there is NO data yet
+  if (loading && !hasLoadedOnce) {
     return <DashboardSkeleton />;
   }
 
@@ -262,17 +286,17 @@ const Dashboard = ({ navigation }: any) => {
             </TouchableOpacity>
 
             <View style={styles.topBarRight}>
-              {/* <TouchableOpacity activeOpacity={0.8} style={styles.iconGlass}>
-                <Icon name="magnify" size={22} color="#E5E7EB" />
-              </TouchableOpacity> */}
               <TouchableOpacity activeOpacity={0.8} style={styles.iconGlass} onPress={() => navigation.navigate("Friends")}>
-  <Icon name="account-plus-outline" size={22} color="#E5E7EB" />
-  {friendReqCount > 0 && (
-    <View style={styles.badgeBubble}>
-      <Text style={styles.badgeText}>{friendReqCount}</Text>
-    </View>
-  )}
-</TouchableOpacity>
+                <Icon name="account-plus-outline" size={22} color="#E5E7EB" />
+                {friendReqCount > 0 && (
+                  <View style={styles.badgeBubble}>
+                    <Text style={styles.badgeText}>{friendReqCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity activeOpacity={0.8} style={styles.iconGlass} onPress={() => navigation.navigate("FriendsManage")}>
+                <Icon1 name="people-outline" size={22} color="#E5E7EB" />
+              </TouchableOpacity>
             </View>
           </View>
 
@@ -366,41 +390,32 @@ const Dashboard = ({ navigation }: any) => {
 
             {/* Main glass button */}
             <TouchableOpacity
-  activeOpacity={0.9}
-  style={styles.glassButton}
-  onPress={() => {
-    // use whatever navigation logic you already fixed (parent navigators etc.)
-    navigation.navigate("MoodScreen", {
-      currentMoodId: currentMood?.mood || null,
-    });
-  }}
->
-  <View style={styles.glassButtonInner}>
-    {currentMood && MOOD_METADATA[currentMood.mood] ? (
-      <>
-        <Icon
-          name={MOOD_METADATA[currentMood.mood].icon}
-          size={22}
-          color={MOOD_METADATA[currentMood.mood].color || "#F9FAFB"}
-        />
-        <Text style={styles.glassButtonText}>
-          {MOOD_METADATA[currentMood.mood].label}
-        </Text>
-      </>
-    ) : (
-      <>
-        <Icon
-          name="emoticon-happy-outline"
-          size={22}
-          color="#F9FAFB"
-        />
-        <Text style={styles.glassButtonText}>
-          Share your current mood
-        </Text>
-      </>
-    )}
-  </View>
-</TouchableOpacity>
+              activeOpacity={0.9}
+              style={styles.glassButton}
+              onPress={() => {
+                navigation.navigate("MoodScreen", {
+                  currentMoodId: currentMood?.mood || null,
+                });
+              }}
+            >
+              <View style={styles.glassButtonInner}>
+                {currentMood && MOOD_METADATA[currentMood.mood] ? (
+                  <>
+                    <Icon name={MOOD_METADATA[currentMood.mood].icon} size={22} color={MOOD_METADATA[currentMood.mood].color || "#F9FAFB"} />
+                    <Text style={styles.glassButtonText}>
+                      {MOOD_METADATA[currentMood.mood].label}
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Icon name="emoticon-happy-outline" size={22} color="#F9FAFB" />
+                    <Text style={styles.glassButtonText}>
+                      Share your current mood
+                    </Text>
+                  </>
+                )}
+              </View>
+            </TouchableOpacity>
 
             {/* Today overview cards */}
             <View style={styles.smallCardRow}>
@@ -411,7 +426,6 @@ const Dashboard = ({ navigation }: any) => {
                   {secondaryCards?.reflectionCount ?? 0}
                 </Text>
               </View>
-
               <View style={[styles.smallCard, { marginRight: 0 }]}>
                 <Icon name="clock-outline" size={22} color="#60A5FA" />
                 <Text style={styles.smallCardTitle}>Habits Completed</Text>
@@ -423,82 +437,80 @@ const Dashboard = ({ navigation }: any) => {
 
             {/* Habits list */}
             <View style={styles.card}>
-  <View style={styles.cardHeaderRow}>
-    <Text style={styles.sectionTitle}>Today’s Activities</Text>
-    <Text style={styles.sectionHint}>Verify and earn XP</Text>
-  </View>
-
-  {habits.length === 0 ? (
-    <View style={{ paddingVertical: 10 }}>
-      <Text
-        style={{
-          fontSize: 13,
-          color: "#9CA3AF",
-          textAlign: "center",
-        }}
-      >
-        No activities updated for today yet.
-      </Text>
-    </View>
-  ) : (
-    <FlatList
-      data={habits}
-      keyExtractor={(item: any) => item.id}
-      scrollEnabled={false}
-      ItemSeparatorComponent={() => (
-        <View style={styles.listSeparator} />
-      )}
-      renderItem={({ item }: any) => (
-        <TouchableOpacity
-          activeOpacity={0.8}
-          style={styles.habitRow}
-        >
-          <View style={styles.habitLeft}>
-            <View style={styles.habitIconWrap}>
-              <Icon name={item.icon || "check"} size={22} color="#C4B5FD" />
+              <View style={styles.cardHeaderRow}>
+                <Text style={styles.sectionTitle}>Today’s Activities</Text>
+                <Text style={styles.sectionHint}>Verify and earn XP</Text>
+              </View>
+              {habits.length === 0 ? (
+                <View style={{ paddingVertical: 10 }}>
+                  <Text
+                    style={{
+                      fontSize: 13,
+                      color: "#9CA3AF",
+                      textAlign: "center",
+                    }}
+                  >
+                    No activities updated for today yet.
+                  </Text>
+                </View>
+              ) : (
+                <FlatList
+                  data={habits}
+                  keyExtractor={(item: any) => item.id}
+                  scrollEnabled={false}
+                  ItemSeparatorComponent={() => (
+                    <View style={styles.listSeparator} />
+                  )}
+                  renderItem={({ item }: any) => (
+                    <TouchableOpacity
+                      activeOpacity={0.8}
+                      style={styles.habitRow}
+                    >
+                      <View style={styles.habitLeft}>
+                        <View style={styles.habitIconWrap}>
+                          <Icon name={item.icon || "check"} size={22} color="#C4B5FD" />
+                        </View>
+                        <View>
+                          <Text style={styles.habitLabel}>
+                            {item.label || item.habitName}
+                          </Text>
+                          <Text style={styles.habitTime}>{item.time || ""}</Text>
+                        </View>
+                      </View>
+                      <View style={styles.checkboxOuter}>
+                        <View
+                          style={[
+                            styles.checkboxInner,
+                            item.status === "verified" && { backgroundColor: "#22C55E" },
+                            item.status === "rejected" && { backgroundColor: "#EF4444" },
+                            item.status === "pending" && { backgroundColor: "#FFFFFF" },
+                          ]}
+                        >
+                          <Icon
+                            name="check"
+                            size={14}
+                            color={
+                              item.status === "pending" ? "#111827" : "#FFFFFF"
+                            }
+                          />
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  )}
+                />
+              )}
             </View>
-            <View>
-              <Text style={styles.habitLabel}>
-                {item.label || item.habitName}
-              </Text>
-              <Text style={styles.habitTime}>{item.time || ""}</Text>
-            </View>
-          </View>
-
-          <View style={styles.checkboxOuter}>
-            <View
-              style={[
-                styles.checkboxInner,
-                item.status === "verified" && { backgroundColor: "#22C55E" },
-                item.status === "rejected" && { backgroundColor: "#EF4444" },
-                item.status === "pending" && { backgroundColor: "#FFFFFF" },
-              ]}
-            >
-              <Icon
-                name="check"
-                size={14}
-                color={
-                  item.status === "pending" ? "#111827" : "#FFFFFF"
-                }
-              />
-            </View>
-          </View>
-        </TouchableOpacity>
-      )}
-    />
-  )}
-</View>
 
             <View style={{ height: 40 }} />
           </ScrollView>
-                  {/* Floating Camera Button */}
-                  <TouchableOpacity
-      activeOpacity={0.8}
-      style={styles.floatingCameraButton}
-      onPress={() => navigation.navigate('ProofCamera', { habitId: null })}
-    >
-      <Icon name="camera-outline" size={26} color="#F9FAFB" />
-    </TouchableOpacity>
+          {/* Floating Camera Button */}
+          <TouchableOpacity
+            activeOpacity={0.8}
+            style={styles.floatingCameraButton}
+            onPress={() => navigation.navigate('ProofCamera', { habitId: null })}
+          >
+            <Icon name="camera-outline" size={26} color="#F9FAFB" />
+          </TouchableOpacity>
         </View>
       </AppScreen>
     </MainLayout>

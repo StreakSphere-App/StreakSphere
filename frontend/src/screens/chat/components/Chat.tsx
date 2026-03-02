@@ -1,22 +1,23 @@
 import React, { useEffect, useState, useCallback, useContext } from "react";
-import { View, FlatList, TouchableOpacity, StyleSheet, TextInput } from "react-native";
+import { View, FlatList, TouchableOpacity, StyleSheet, TextInput, Image } from "react-native";
 import { Text } from "@rneui/themed";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
 import NetInfo from "@react-native-community/netinfo";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
-import { fetchConversations, fetchFriends } from "../services/api_e2ee";
-import { listConversationPreviews } from "../services/LocalConversationStore";
+import { listConversationPreviews as listConversationPreviewsApi, fetchFriends } from "../services/api_chat";
 
 import MainLayout from "../../../shared/components/MainLayout";
-import { getStableDeviceId } from "../../../shared/services/stableDeviceId";
 import AuthContext from "../../../auth/user/UserContext";
-import { getUnread, subscribeUnreadChanges } from '../services/ChatNotifications';
-import { subscribeConversationChanges } from '../services/ChatNotifications';
+import { getUnread, subscribeUnreadChanges, subscribeConversationChanges } from "../services/ChatNotifications";
+import apiClient from "../../../auth/api-client/api_client";
 
+const CACHE_KEY = "chat_list_cache";
 
 const formatLastTime = (iso?: string) => {
   if (!iso) return "";
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
   const now = new Date();
 
   const sameDay =
@@ -24,90 +25,151 @@ const formatLastTime = (iso?: string) => {
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
 
-  if (sameDay) {
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+const saveCache = async (userId: string, data: any[]) => {
+  try {
+    await AsyncStorage.setItem(`${CACHE_KEY}:${userId}`, JSON.stringify(data));
+  } catch {}
+};
+
+const loadCache = async (userId: string): Promise<any[]> => {
+  try {
+    const raw = await AsyncStorage.getItem(`${CACHE_KEY}:${userId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
   }
-  return d.toLocaleDateString([], { month: "short", day: "numeric" }); // e.g. Jan 8
+};
+
+// ✅ person icon fallback instead of initials
+const Avatar = ({ url }: { url?: string }) => {
+
+  if (url) {
+    return (
+      <Image
+        source={{ uri: url }}
+        style={styles.avatar}
+      />
+    );
+  } else {
+  return (
+    <View style={styles.avatarFallback}>
+      <Icon name="account" size={22} color="#cbd5e1" />
+    </View>
+  );
+}
 };
 
 export default function ChatListScreen({ navigation }: any) {
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState<any[]>([]);
   const [offline, setOffline] = useState(false);
-  const [unreadVersion, setUnreadVersion] = useState(0); // ✅ triggers reload
+  const [version, setVersion] = useState(0);
 
   const user = useContext(AuthContext);
-  const myUserId = user?.User?.user?.id;
+  const myUserId = String(user?.User?.user?.id || user?.User?.user?._id || "");
 
-  const load = useCallback(async () => {
+    const baseUrl = apiClient.getBaseURL();
+  const newUrl = baseUrl.replace(/\/api\/?$/, "");
+
+  useEffect(() => {
+    if (!myUserId) return;
+    loadCache(myUserId).then((cached) => {
+      if (cached.length > 0) setRows(cached);
+    });
+  }, [myUserId]);
+
+  const loadOnline = useCallback(async () => {
+    if (!myUserId || offline) return;
+
     try {
-      if (!myUserId) return;
-      const deviceId = await getStableDeviceId(myUserId);
+      const [{ data: convRes }, friendsRes] = await Promise.all([
+        listConversationPreviewsApi(),
+        fetchFriends(),
+      ]);
 
-      const { data } = await fetchConversations(deviceId);
-      const serverConvos = data.conversations || [];
-
-      const friendsRes = await fetchFriends();
       const friends = friendsRes?.data?.friends || [];
-      const nameMap = new Map<string, string>();
-      for (const f of friends) nameMap.set(String(f._id), String(f.name || f.username || "Friend"));
-
-      const previews = await listConversationPreviews(String(myUserId), String(deviceId));
-      const previewMap = new Map(previews.map((p) => [String(p.peerUserId), p]));
-
-      const merged = serverConvos.map((c: any) => {
-        const peerId = String(c._id);
-        const p = previewMap.get(peerId);
-
-        console.log(c);
-        
       
+      const friendMap = new Map<
+        string,
+        { name: string; avatarUrl: string; avatarThumb: string; avatarPublicUrl: string }
+      >();
+
+      for (const f of friends) {
+        const id = String(f._id);
+        friendMap.set(id, {
+          name: String(f.name || f.username || "Friend"),
+          avatarUrl: String(f.avatar || ""),
+          avatarThumb: String(f.avatarThumbnailUrl || ""),
+          avatarPublicUrl: String(f.avatar?.url || ""),
+        });
+      }
+
+      const convos = convRes?.conversations || [];
+      const mapped = convos.map((c: any) => {
+        const peerId = String(c.peerUserId);
+        const friend = friendMap.get(peerId);
+
+        const resolvedAvatar =
+          friend?.avatarUrl ||
+          "";
+
         return {
+          conversationId: String(c.conversationId),
           peerUserId: peerId,
-          peerName: nameMap.get(peerId) || "Friend",
+          peerName: c.peerName || friend?.name || "Friend",
+          peerAvatarUrl: String(resolvedAvatar || ""),
           mood: c.mood || "",
-          lastText: p?.lastText ?? "",
-          lastAt: p?.lastAt ?? c?.lastMessage?.createdAt ?? "",
-          unread: getUnread(peerId),
+          lastText: c.lastText || "",
+          lastAt: c.lastAt || "",
+          unread: Number(getUnread(peerId) || c.unread || 0),
         };
       });
 
-      merged.sort((a, b) => new Date(b.lastAt || 0).getTime() - new Date(a.lastAt || 0).getTime());
-      setRows(merged);
+      mapped.sort(
+        (a: any, b: any) =>
+          new Date(b.lastAt || 0).getTime() - new Date(a.lastAt || 0).getTime()
+      );
+
+      setRows(mapped);
+      await saveCache(myUserId, mapped);
     } catch (e) {
-      console.log("load convos error", e);
+      console.log("load list error — using cache", e);
     }
-  }, [myUserId, unreadVersion]); // ✅ re-run when unread changes
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  useEffect(() => {
-    const unsub = navigation.addListener("focus", load);
-    return unsub;
-  }, [navigation, load]);
-
-  useEffect(() => {
-    const unsub = subscribeConversationChanges(() => {
-      console.log("[chat] conversation change received in ChatListScreen");
-      setUnreadVersion((v) => v + 1);
-    });
-    return () => unsub();
-  }, []);
-  useEffect(() => {
-    const unsubUnread = subscribeUnreadChanges(() => {
-      setUnreadVersion((v) => v + 1);
-    });
-    return () => unsubUnread();
-  }, []);
+  }, [myUserId, offline]);
 
   useEffect(() => {
     const unsub = NetInfo.addEventListener((state) => {
-      const isOffline = !state.isConnected || state.isInternetReachable === false;
-      setOffline(isOffline);
+      setOffline(!state.isConnected || state.isInternetReachable === false);
     });
     return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    loadOnline();
+  }, [loadOnline, version]);
+
+  useEffect(() => {
+    const unsub = navigation.addListener("focus", () => {
+      if (!myUserId) return;
+      loadCache(myUserId).then((cached) => {
+        if (cached.length) setRows(cached);
+      });
+      loadOnline();
+    });
+    return unsub;
+  }, [navigation, loadOnline, myUserId]);
+
+  useEffect(() => {
+    const a = subscribeConversationChanges(() => setVersion((v) => v + 1));
+    const b = subscribeUnreadChanges(() => setVersion((v) => v + 1));
+    return () => {
+      a();
+      b();
+    };
   }, []);
 
   const filtered = rows.filter((r) =>
@@ -126,10 +188,13 @@ export default function ChatListScreen({ navigation }: any) {
             <View>
               <Text style={styles.title}>Chats</Text>
               <Text style={[styles.netStatus, offline ? styles.netOffline : styles.netOnline]}>
-                {offline ? "Connecting..." : "Online"}
+                {offline ? "Offline" : "Online"}
               </Text>
             </View>
-            <TouchableOpacity style={styles.iconBtn} onPress={() => navigation.navigate("NewChat")}>
+            <TouchableOpacity
+              style={styles.iconBtn}
+              onPress={() => navigation.navigate("NewChat")}
+            >
               <Icon name="plus" size={22} color="#fff" />
             </TouchableOpacity>
           </View>
@@ -147,40 +212,43 @@ export default function ChatListScreen({ navigation }: any) {
 
           <FlatList
             data={filtered}
-            keyExtractor={(item) => item.peerUserId}
+            keyExtractor={(item) => `${item.conversationId}:${item.peerUserId}`}
+            keyboardShouldPersistTaps="handled"
             renderItem={({ item }) => (
               <TouchableOpacity
                 style={styles.row}
                 onPress={() =>
                   navigation.navigate("chat", {
+                    conversationId: item.conversationId,
                     peerUserId: item.peerUserId,
                     peerName: item.peerName,
-                    peerMood: item.mood, // ✅ add this
+                    peerMood: item.mood,
+                    peerAvatarUrl: item.peerAvatarUrl, // pass avatar to chat header
                   })
                 }
               >
-                <View style={styles.rowTop}>
-                <Text style={styles.peer} numberOfLines={1}>
-                {item.peerName}  {item.mood ? `[ is ${item.mood} ] ` : ""}
-</Text>
-                  <Text style={styles.time}>{formatLastTime(item.lastAt)}</Text>
-                </View>
+                <Avatar url={ newUrl + item.peerAvatarUrl} />
 
-                <View style={styles.rowTop}>
-                <Text style={styles.snippet} numberOfLines={1}>
-  {!item.lastAt
-    ? "No messages yet"
-    : item.unread > 0
-      ? "Sent a message"
-      : "Opened message"}
-</Text>
-                  {item.unread > 0 && (
-                    <View style={styles.badge}>
-                      <Text style={styles.badgeText} numberOfLines={1}>
-                        {item.unread > 99 ? '99+' : item.unread}
-                      </Text>
-                    </View>
-                  )}
+                <View style={styles.rowContent}>
+                  <View style={styles.rowTop}>
+                    <Text style={styles.peer} numberOfLines={1}>
+                      {item.peerName}
+                    </Text>
+                    <Text style={styles.time}>{formatLastTime(item.lastAt)}</Text>
+                  </View>
+
+                  <View style={styles.rowTop}>
+                    <Text style={styles.snippet} numberOfLines={1}>
+                      {item.lastText || "No messages yet"}
+                    </Text>
+                    {item.unread > 0 && (
+                      <View style={styles.badge}>
+                        <Text style={styles.badgeText} numberOfLines={1}>
+                          {item.unread > 99 ? "99+" : item.unread}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
                 </View>
               </TouchableOpacity>
             )}
@@ -213,19 +281,75 @@ const styles = StyleSheet.create({
     borderRadius: 220,
     backgroundColor: "rgba(168, 85, 247, 0.28)",
   },
-  rowTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 2 },
+
+  row: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderRadius: 12,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  rowContent: { flex: 1, marginLeft: 10 },
+
+  avatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.35)",
+  },
+  avatarFallback: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.35)",
+  },
+
+  rowTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 2,
+  },
   time: { color: "#94a3b8", fontSize: 12, marginLeft: 10 },
-  topBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
+
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
   title: { color: "#fff", fontSize: 20, fontWeight: "800" },
   netStatus: { fontSize: 12, marginTop: 2 },
   netOnline: { color: "#22c55e" },
   netOffline: { color: "#f97316" },
-  iconBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: "#6366f1", alignItems: "center", justifyContent: "center" },
-  searchBox: { flexDirection: "row", alignItems: "center", backgroundColor: "rgba(255,255,255,0.06)", borderRadius: 12, paddingHorizontal: 10, marginBottom: 10, borderWidth: 1, borderColor: "rgba(148,163,184,0.3)" },
+  iconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#6366f1",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  searchBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.3)",
+  },
   searchInput: { flex: 1, color: "#fff", paddingVertical: 8, marginLeft: 6 },
-  row: { backgroundColor: "rgba(255,255,255,0.05)", borderRadius: 12, padding: 12 },
-  peer: { color: "#fff", fontSize: 16, fontWeight: "700" },
-  snippet: { color: "#94a3b8", marginTop: 4 },
+
+  peer: { color: "#fff", fontSize: 16, fontWeight: "700", flex: 1, marginRight: 8 },
+  snippet: { color: "#94a3b8", marginTop: 4, flex: 1, marginRight: 8 },
   badge: {
     marginLeft: 8,
     backgroundColor: "#f43f5e",

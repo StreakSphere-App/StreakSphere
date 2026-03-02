@@ -19,7 +19,13 @@ import {
   getAvatarUrl,
   updateAvatarUrl,
   updateLocation,
-  getLocationLockStatus
+  getLocationLockStatus,
+  upload,
+  uploadAvatar,
+  getMyAvatar,
+  getUserProfile,
+  deleteAvatar,
+  requestDeleteAccountOtp
 } from "../controllers/ProfileController.js";
 import { isAuthenticatedUser } from "../middlewares/auth.js";
 
@@ -47,15 +53,23 @@ router.post("/notifications", isAuthenticatedUser, updateNotifications);
 router.post("/app-settings", isAuthenticatedUser, updateAppSettings);
 
 // Account Delete
-router.delete("/delete", isAuthenticatedUser, deleteAccount);
+router.post("/delete", isAuthenticatedUser, deleteAccount);
+router.post("/request-delete", isAuthenticatedUser, requestDeleteAccountOtp);
 
 router.get("/login-activity", isAuthenticatedUser, getLoginActivity);
 router.get('/me/avatar', isAuthenticatedUser, getAvatarConfig);
 router.post('/me/avatar', isAuthenticatedUser, updateAvatarConfig);
-router.get('/me/avatar-url', isAuthenticatedUser, getAvatarUrl);
-router.post('/me/avatar-url', isAuthenticatedUser, updateAvatarUrl);
+// router.get('/me/avatar-url', isAuthenticatedUser, getAvatarUrl);
+// router.post('/me/avatar-url', isAuthenticatedUser, updateAvatarUrl);
+
 router.post('/me/location', isAuthenticatedUser, updateLocation);
 router.get('/me/location/lock', isAuthenticatedUser, getLocationLockStatus);
+
+router.post("/me/avatar-url", isAuthenticatedUser, upload.single("avatar"), uploadAvatar);
+router.get("/me/avatar-url", isAuthenticatedUser, getMyAvatar);
+router.delete("/me/delete-avatar", isAuthenticatedUser, deleteAvatar);
+// routes/avatarRoutes.js
+router.get("/avatar/:userId", getUserProfile);
 
 
 export default router;

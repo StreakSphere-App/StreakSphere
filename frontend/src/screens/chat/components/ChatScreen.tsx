@@ -5,31 +5,37 @@ import {
   StyleSheet,
   TouchableOpacity,
   TextInput,
-  KeyboardAvoidingView,
-  Platform,
   Keyboard,
   LayoutAnimation,
-  TouchableWithoutFeedback,
+  Image,
 } from "react-native";
+import NetInfo from "@react-native-community/netinfo";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Text } from "@rneui/themed";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
+import { v4 as uuidv4 } from "uuid";
 
 import AuthContext from "../../../auth/user/UserContext";
-import { sendCipher, pullMessages, fetchDevices } from "../services/api_e2ee";
-import { SessionManager } from "../services/SessionManager";
-import { ensureDeviceKeys } from "../services/bootstrap";
-import { getStableDeviceId } from "../../../shared/services/stableDeviceId";
-import { SignalStore } from "../services/signalStore";
-import { LocalMessageStore } from "../services/LocalMessageStore";
-import { clearUnread, setActiveChatPeer } from '../services/ChatNotifications';
-import { markMessagesAsRead } from '../services/api_e2ee'; // We'll define this below
-import { markMessagesSeenLocally } from '../services/ChatNotifications'; // Make sure this is exported
-import { getLocalSeenAt } from '../services/ChatNotifications';
-import { notifyConversationChanged } from '../services/ChatNotifications';
-
-
-const asNum = (v: any) => (typeof v === "string" ? parseInt(v, 10) : v);
+import {
+  openDirectConversation,
+  sendMessage,
+  fetchThread,
+  markDelivered,
+  markSeen,
+} from "../services/api_chat";
+import {
+  clearUnread,
+  setActiveChatPeer,
+  notifyConversationChanged,
+  isMessageDeliveredLocally,
+} from "../services/ChatNotifications";
+import {
+  loadThreadMessages as loadThreadCacheV2,
+  saveThreadMessages as saveThreadCacheV2,
+  upsertThreadMessage as upsertThreadMessageV2,
+  upsertConversationPreview as upsertPreviewV2,
+} from "../services/LocalChatCache";
+import apiClient from "../../../auth/api-client/api_client";
 
 type Item =
   | { type: "date"; id: string; dateKey: string }
@@ -58,23 +64,65 @@ const formatTime = (iso: string) =>
 
 export default function ChatScreen({ route, navigation }: any) {
   const user = useContext(AuthContext);
-  const { peerUserId, peerName, peerMood } = route.params;
+  const { peerUserId, peerName, peerMood, peerAvatarUrl, avatarUrl } = route.params;
   const insets = useSafeAreaInsets();
 
-  const myUserId = user?.User?.user?.id;
+  const myUserId = String(user?.User?.user?.id || user?.User?.user?._id || "");
 
-  const [deviceId, setDeviceId] = useState<string | null>(null);
-  const [sessionManager, setSessionManager] = useState<SessionManager | null>(null);
-
+  const [conversationId, setConversationId] = useState<string | null>(
+    route?.params?.conversationId || null
+  );
   const [messages, setMessages] = useState<any[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [input, setInput] = useState("");
-
-  const [kbHeight, setKbHeight] = useState(0);
+  const [offline, setOffline] = useState(false);
 
   const flatRef = useRef<FlatList>(null);
+  const didInitialAutoScrollRef = useRef(false);
+
+  const resolvedPeerAvatar = String(peerAvatarUrl || avatarUrl || "");
+  const [avatarFailed, setAvatarFailed] = useState(false);
+
+      const baseUrl = apiClient.getBaseURL();
+  const newUrl = baseUrl.replace(/\/api\/?$/, "");
+
   const scrollToBottom = () =>
     requestAnimationFrame(() => flatRef.current?.scrollToEnd({ animated: true }));
+
+  const normalizeServer = useCallback(
+    (serverMsgs: any[]) => {
+      return serverMsgs
+        .map((m: any) => {
+          const isMe = String(m.senderId) === String(myUserId);
+          let tickState = "pending";
+
+          if (isMe) {
+            if (m.seenAt) tickState = "seen";
+            else if (m.deliveredAt) tickState = "delivered";
+            else tickState = "sent";
+          } else {
+            tickState = "delivered";
+          }
+
+          return {
+            _id: String(m._id),
+            fromUserId: String(m.senderId),
+            toUserId: String(m.receiverId),
+            plaintext: String(m.text || ""),
+            createdAt: m.createdAt,
+            clientMessageId: m.clientMessageId,
+            seenAt: m.seenAt || null,
+            deliveredAt: m.deliveredAt || null,
+            tickState,
+          };
+        })
+        .sort(
+          (a: any, b: any) =>
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+    },
+    [myUserId]
+  );
 
   const buildItemsWithDateSeparators = useCallback((msgs: any[]): Item[] => {
     const out: Item[] = [];
@@ -91,399 +139,421 @@ export default function ChatScreen({ route, navigation }: any) {
   }, []);
 
   useEffect(() => {
+    const unsub = NetInfo.addEventListener((state) => {
+      setOffline(!state.isConnected || state.isInternetReachable === false);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", () => {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setTimeout(scrollToBottom, 80);
+    });
+    return () => show.remove();
+  }, []);
+
+  useEffect(() => {
     const onFocus = async () => {
       setActiveChatPeer(String(peerUserId));
       clearUnread(String(peerUserId));
-      await markMessagesAsRead(peerUserId); // Make API call!
     };
     const onBlur = () => setActiveChatPeer(null);
-  
-    const unsubFocus = navigation.addListener('focus', onFocus);
-    const unsubBlur = navigation.addListener('blur', onBlur);
     onFocus();
-  
-    return () => {
-      unsubFocus();
-      unsubBlur();
-      onBlur();
-    };
-  }, [navigation, peerUserId]);
+    return onBlur;
+  }, [peerUserId]);
 
   useEffect(() => {
     setItems(buildItemsWithDateSeparators(messages));
   }, [messages, buildItemsWithDateSeparators]);
 
-  // keyboard height (needed for Android when using absolute input bar)
-  useEffect(() => {
-    const showEvt = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hideEvt = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-
-    const show = Keyboard.addListener(showEvt, (e: any) => {
-      LayoutAnimation.easeInEaseOut();
-      setKbHeight(e?.endCoordinates?.height ?? 0);
-    });
-    const hide = Keyboard.addListener(hideEvt, () => {
-      LayoutAnimation.easeInEaseOut();
-      setKbHeight(0);
-    });
-
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
-
   useEffect(() => {
     (async () => {
-      if (!myUserId) return;
-      const id = await getStableDeviceId(myUserId);
-      setDeviceId(id);
-      setSessionManager(new SessionManager(myUserId, id));
-    })();
-  }, [myUserId]);
-
-  useEffect(() => {
-    (async () => {
+      if (conversationId || !myUserId || offline) return;
       try {
-        if (!myUserId || !deviceId) return;
-        await ensureDeviceKeys(myUserId, deviceId);
+        const { data } = await openDirectConversation(String(peerUserId));
+        const cid = data?.conversation?._id;
+        if (cid) setConversationId(String(cid));
       } catch (e) {
-        console.log("ensureDeviceKeys error", e);
+        console.log("openDirectConversation error", e);
       }
     })();
-  }, [myUserId, deviceId]);
+  }, [peerUserId, conversationId, myUserId, offline]);
 
-  const loadFromStorage = useCallback(async () => {
-    if (!myUserId || !deviceId || !peerUserId) return;
-    const store = new LocalMessageStore(String(myUserId), String(deviceId), String(peerUserId));
-    const local = await store.listPlaintext();
+  const loadThread = useCallback(async () => {
+    if (!conversationId || !myUserId) return;
 
-    setMessages(
-      local.map((m) => ({
-        _id: m.id,
-        fromUserId: String(m.fromUserId),
-        fromDeviceId: String(m.fromDeviceId),
-        toUserId: String(peerUserId),
-        toDeviceId: String(m.toDeviceId),
-        plaintext: m.plaintext,
-        createdAt: m.createdAt,
-      }))
-    );
-  }, [myUserId, deviceId, peerUserId]);
-
-  const pullDecryptStore = useCallback(async () => {
-    if (!deviceId || !myUserId || !peerUserId || !sessionManager) return;
-
-    const store = new LocalMessageStore(String(myUserId), String(deviceId), String(peerUserId));
-    const { data } = await pullMessages(deviceId);
-    const pulled = data?.messages || [];
-    if (!pulled.length) return;
-
-    for (const m of pulled) {
-      const peer =
-        String(m.fromUserId) === String(myUserId) ? String(m.toUserId) : String(m.fromUserId);
-      if (peer !== String(peerUserId)) continue;
-
-      try {
-        const pt = await sessionManager.decrypt(m.fromUserId, m.fromSignalDeviceId, {
-          type: m.header?.t,
-          body: m.ciphertext,
-        });
-
-        await store.upsertPlaintext({
-          id: `srv:${m._id}`,
+    const cached = await loadThreadCacheV2(String(myUserId), String(conversationId));
+    if (cached.length) {
+      const normalizedCached = normalizeServer(
+        cached.map((m: any) => ({
+          _id: m._id,
+          senderId: m.senderId,
+          receiverId: m.receiverId,
+          text: m.text,
           createdAt: m.createdAt,
-          fromUserId: String(m.fromUserId),
-          fromDeviceId: String(m.fromDeviceId),
-          toDeviceId: String(m.toDeviceId),
-          plaintext: pt,
-          status: "received",
-        });
-
-        notifyConversationChanged();
-
-        setMessages((prev) => {
-          const exists = prev.some((x) => String(x._id) === `srv:${m._id}`);
-          if (exists) return prev;
-
-          const next = [
-            ...prev,
-            {
-              _id: `srv:${m._id}`,
-              fromUserId: String(m.fromUserId),
-              fromDeviceId: String(m.fromDeviceId),
-              toUserId: String(peerUserId),
-              toDeviceId: String(m.toDeviceId),
-              plaintext: pt,
-              createdAt: m.createdAt,
-            },
-          ];
-          next.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-          return next;
-        });
-      } catch (e) {
-        console.log("decrypt failed (pull)", m._id, e);
-      }
+          clientMessageId: m.clientMessageId,
+          deliveredAt: m.deliveredAt,
+          seenAt: m.seenAt,
+        }))
+      );
+      setMessages(normalizedCached);
     }
 
-    scrollToBottom();
-  }, [deviceId, myUserId, peerUserId, sessionManager]);
+    if (offline) return;
+
+    try {
+      const { data } = await fetchThread(String(conversationId), { limit: 200 });
+      const serverMsgs = data?.messages || [];
+
+      await saveThreadCacheV2(
+        String(myUserId),
+        String(conversationId),
+        serverMsgs.map((m: any) => ({
+          _id: String(m._id),
+          conversationId: String(conversationId),
+          senderId: String(m.senderId),
+          receiverId: String(m.receiverId),
+          text: String(m.text || ""),
+          createdAt: m.createdAt,
+          clientMessageId: m.clientMessageId,
+          deliveredAt: m.deliveredAt || null,
+          seenAt: m.seenAt || null,
+        }))
+      );
+
+      if (serverMsgs.length) {
+        const last = serverMsgs[serverMsgs.length - 1];
+        await upsertPreviewV2(String(myUserId), {
+          conversationId: String(conversationId),
+          peerUserId: String(peerUserId),
+          peerName: String(peerName || "Friend"),
+          mood: String(peerMood || ""),
+          lastText: String(last.text || ""),
+          lastAt: String(last.createdAt || new Date().toISOString()),
+          unread: 0,
+        });
+      }
+
+      const normalizedServer = normalizeServer(serverMsgs);
+
+      setMessages((prev) => {
+        const serverClientIds = new Set(
+          normalizedServer
+            .map((m: any) => m.clientMessageId)
+            .filter(Boolean)
+            .map((x: any) => String(x))
+        );
+
+        const serverIds = new Set(normalizedServer.map((m: any) => String(m._id)));
+
+        const stillPendingLocal = prev.filter((m: any) => {
+          const isLocalId = String(m._id).startsWith("loc:");
+          const hasClientId = !!m.clientMessageId;
+          const existsOnServerById = serverIds.has(String(m._id));
+          const existsOnServerByClientId =
+            hasClientId && serverClientIds.has(String(m.clientMessageId));
+          return isLocalId && !existsOnServerById && !existsOnServerByClientId;
+        });
+
+        return [...normalizedServer, ...stillPendingLocal].sort(
+          (a: any, b: any) =>
+            new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+      });
+
+      const incomingUndelivered = serverMsgs
+        .filter((m: any) => String(m.receiverId) === String(myUserId) && !m.deliveredAt)
+        .map((m: any) => String(m._id));
+
+      if (incomingUndelivered.length) {
+        await markDelivered(incomingUndelivered);
+      }
+
+      const incoming = serverMsgs.filter((m: any) => String(m.receiverId) === String(myUserId));
+      if (incoming.length) {
+        const lastIncoming = incoming[incoming.length - 1];
+        await markSeen({
+          conversationId: String(conversationId),
+          peerUserId: String(peerUserId),
+          lastSeenMessageId: String(lastIncoming._id),
+        });
+      }
+
+      notifyConversationChanged();
+    } catch (e) {
+      console.log("loadThread error — using cache", e);
+    }
+  }, [conversationId, myUserId, peerUserId, peerName, peerMood, offline, normalizeServer]);
 
   useEffect(() => {
     const unsub = navigation.addListener("focus", async () => {
-      await loadFromStorage();
-      await pullDecryptStore();
-      setTimeout(scrollToBottom, 50);
+      didInitialAutoScrollRef.current = false;
+      await loadThread();
+      setTimeout(scrollToBottom, 60);
     });
 
     (async () => {
-      await loadFromStorage();
-      await pullDecryptStore();
-      setTimeout(scrollToBottom, 50);
+      await loadThread();
+      setTimeout(scrollToBottom, 60);
     })();
 
     return unsub;
-  }, [navigation, loadFromStorage, pullDecryptStore]);
+  }, [navigation, loadThread]);
 
   useEffect(() => {
-    const t = setInterval(pullDecryptStore, 2000);
+    if (offline) return;
+    const t = setInterval(loadThread, 2500);
     return () => clearInterval(t);
-  }, [pullDecryptStore]);
+  }, [loadThread, offline]);
 
   const send = useCallback(async () => {
-    console.log("SEND function called", { text: input });
     const text = input.trim();
-    if (!text || !sessionManager || !myUserId || !deviceId) return;
-  
-    const now = new Date().toISOString();
-    setInput("");
-  
-    const localStore = new LocalMessageStore(String(myUserId), String(deviceId), String(peerUserId));
-    const localId = `loc:${now}:${Math.random().toString(16).slice(2)}`;
-  
-    await localStore.upsertPlaintext({
-      id: localId,
-      createdAt: now,
-      fromUserId: String(myUserId),
-      fromDeviceId: String(deviceId),
-      toDeviceId: String(deviceId),
-      plaintext: text,
-      status: "sent",
-    });
+    if (!text || !conversationId || !myUserId) return;
 
-    notifyConversationChanged();
-  
+    const now = new Date().toISOString();
+    const clientMessageId = uuidv4();
+    const localId = `loc:${clientMessageId}`;
+    setInput("");
+
     setMessages((prev) => {
       const next = [
         ...prev,
         {
           _id: localId,
           fromUserId: String(myUserId),
-          fromDeviceId: String(deviceId),
           toUserId: String(peerUserId),
-          toDeviceId: String(deviceId),
           plaintext: text,
           createdAt: now,
+          clientMessageId,
+          tickState: "pending",
+          deliveredAt: null,
+          seenAt: null,
         },
-      ];
-      next.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      ].sort(
+        (a: any, b: any) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
       return next;
     });
+
     scrollToBottom();
-  
+
+    await upsertThreadMessageV2(String(myUserId), String(conversationId), {
+      _id: localId,
+      conversationId: String(conversationId),
+      senderId: String(myUserId),
+      receiverId: String(peerUserId),
+      text,
+      createdAt: now,
+      clientMessageId,
+      deliveredAt: null,
+      seenAt: null,
+    });
+
+    await upsertPreviewV2(String(myUserId), {
+      conversationId: String(conversationId),
+      peerUserId: String(peerUserId),
+      peerName: String(peerName || "Friend"),
+      mood: String(peerMood || ""),
+      lastText: text,
+      lastAt: now,
+      unread: 0,
+    });
+
+    notifyConversationChanged();
+
+    if (offline) return;
+
     try {
-      const store = new SignalStore(myUserId, deviceId);
-      const mySignalDeviceId = await store.getSignalDeviceId();
-      if (!mySignalDeviceId) throw new Error("Missing my signalDeviceId");
-  
-      const { data: peerData } = await fetchDevices(peerUserId);
-      const peerDevices = peerData?.devices || [];
-  
-      const { data: myData } = await fetchDevices(myUserId);
-      const myDevices = myData?.devices || [];
-  
-      const buildBundle = (d: any) => {
-        const otp = d.oneTimePrekeys?.[0];
-        const preKeyPub = otp?.publicKey;
-  
-        if (
-          typeof d.signalDeviceId !== "number" ||
-          typeof d.registrationId !== "number" ||
-          !d.identityPub ||
-          !d.signedPrekeyPub ||
-          !d.signedPrekeySig ||
-          !otp?.keyId ||
-          !preKeyPub
-        ) {
-          return null;
-        }
-        return {
-          bundle: {
-            deviceId: d.signalDeviceId,
-            registrationId: d.registrationId,
-            identityKey: d.identityPub,
-            signedPreKey: {
-              keyId: asNum(d.signedPrekeyId ?? 1),
-              publicKey: d.signedPrekeyPub,
-              signature: d.signedPrekeySig,
-            },
-            preKey: {
-              keyId: asNum(otp.keyId),
-              publicKey: preKeyPub,
-            },
-          },
-          otpKeyId: otp.keyId as number,
-          routingDeviceId: d.deviceId as string,
-        };
-      };
-  
-      // ✅ Only one peer device upload gets notifyUser: true!
-      for (const [idx, d] of peerDevices.entries()) {
-        const built = buildBundle(d);
-        if (!built) continue;
-  
-        await sessionManager.ensureSession(peerUserId, built.bundle);
-        const cipherPayload = await sessionManager.encrypt(peerUserId, built.bundle, text);
-  
-        await sendCipher({
-          toUserId: peerUserId,
-          toDeviceId: built.routingDeviceId,
-          fromDeviceId: deviceId,
-          fromSignalDeviceId: mySignalDeviceId,
-          sessionId: `sess-${peerUserId}-${built.routingDeviceId}`,
-          header: { t: cipherPayload.type, preKeyId: built.otpKeyId },
-          ciphertext: cipherPayload.body,
-          notifyUser: idx === 0, // <-- THIS IS CRITICAL
+      const { data } = await sendMessage({
+        conversationId: String(conversationId),
+        receiverId: String(peerUserId),
+        text: String(text),
+        clientMessageId: String(clientMessageId),
+        notifyUser: true,
+      });
+
+      const srv = data?.message;
+
+      if (srv?._id) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.clientMessageId === clientMessageId
+              ? {
+                  ...m,
+                  _id: String(srv._id),
+                  createdAt: srv.createdAt || m.createdAt,
+                  tickState: srv.seenAt ? "seen" : srv.deliveredAt ? "delivered" : "sent",
+                  deliveredAt: srv.deliveredAt || null,
+                  seenAt: srv.seenAt || null,
+                }
+              : m
+          )
+        );
+
+        await upsertThreadMessageV2(String(myUserId), String(conversationId), {
+          _id: String(srv._id),
+          conversationId: String(conversationId),
+          senderId: String(myUserId),
+          receiverId: String(peerUserId),
+          text: String(srv.text || text),
+          createdAt: String(srv.createdAt || now),
+          clientMessageId: String(clientMessageId),
+          deliveredAt: srv.deliveredAt || null,
+          seenAt: srv.seenAt || null,
+        });
+
+        await upsertPreviewV2(String(myUserId), {
+          conversationId: String(conversationId),
+          peerUserId: String(peerUserId),
+          peerName: String(peerName || "Friend"),
+          mood: String(peerMood || ""),
+          lastText: String(srv.text || text),
+          lastAt: String(srv.createdAt || now),
+          unread: 0,
         });
       }
-  
-      // For your own devices, no notifyUser flag
-      for (const d of myDevices) {
-        const built = buildBundle(d);
-        if (!built) continue;
-  
-        await sessionManager.ensureSession(myUserId, built.bundle);
-        const cipherPayload = await sessionManager.encrypt(myUserId, built.bundle, text);
-  
-        await sendCipher({
-          toUserId: peerUserId,
-          toDeviceId: built.routingDeviceId,
-          fromDeviceId: deviceId,
-          fromSignalDeviceId: mySignalDeviceId,
-          sessionId: `sess-${peerUserId}-${built.routingDeviceId}`,
-          header: { t: cipherPayload.type, preKeyId: built.otpKeyId },
-          ciphertext: cipherPayload.body,
-          // no notifyUser
-        });
-      }
+
+      notifyConversationChanged();
+      setTimeout(() => {
+        loadThread();
+      }, 600);
     } catch (e) {
       console.log("send error", e);
     }
-  }, [input, sessionManager, myUserId, deviceId, peerUserId]);
+  }, [input, conversationId, myUserId, peerUserId, peerName, peerMood, offline, loadThread]);
 
-  const inputBarBase = 74;
-  const inputBarHeight = inputBarBase + insets.bottom;
+  const renderTick = (m: any) => {
+    const s = m.tickState || "pending";
+    if (s === "seen") return <Icon name="check-all" size={13} color="#2dd4bf" style={styles.tickIcon} />;
+    if (s === "delivered") return <Icon name="check-all" size={13} color="#a3a3a3" style={styles.tickIcon} />;
+    if (s === "sent") return <Icon name="check" size={13} color="#a3a3a3" style={styles.tickIcon} />;
+    return <Icon name="clock-outline" size={13} color="#a3a3a3" style={styles.tickIcon} />;
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={["left", "right"]}>
-      {/* ✅ KeyboardAvoidingView is now enabled for BOTH platforms */}
-      <KeyboardAvoidingView
-        style={styles.root}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={0}
-      >
+      <View style={styles.root}>
         <View style={styles.baseBackground} />
         <View style={styles.glowTop} />
         <View style={styles.glowBottom} />
 
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-          <View style={{ flex: 1 }}>
-            <View style={styles.container}>
-              <View style={styles.topBar}>
-                <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn}>
-                  <Icon name="arrow-left" size={22} color="#fff" />
-                </TouchableOpacity>
-                <Text style={styles.title}>
-                {peerName || "Friend"} {peerMood ? `[ is ${peerMood} ] ` : ""}
-</Text>
-                <View style={{ width: 42 }} />
-              </View>
+        <View style={styles.innerContainer}>
+          <View style={styles.container}>
+            <View style={styles.topBar}>
+              <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconBtn}>
+                <Icon name="arrow-left" size={22} color="#fff" />
+              </TouchableOpacity>
 
-              <FlatList
-                ref={flatRef}
-                data={items}
-                keyExtractor={(it) => it.id}
-                contentContainerStyle={[styles.listContent, { paddingBottom: inputBarHeight + 10 }]}
-                renderItem={({ item }) => {
-                  if (item.type === "date") {
-                    return (
-                      <View style={styles.dateRow}>
-                        <Text style={styles.dateText}>{formatDateHeader(item.dateKey)}</Text>
-                      </View>
-                    );
-                  }
-                
-                  const m = item.msg;
-                  const isMe = String(m.fromUserId) === String(myUserId);
-                  const localSeenAt = getLocalSeenAt(m.toUserId);
-                  // Show blue tick if message has backend .seenAt, or if it’s <= locally updated "seen"
-                  let showBlueTick = false;
-                  if (isMe) {
-                    showBlueTick = !!m.seenAt ||
-                      (!!localSeenAt && new Date(m.createdAt) <= new Date(localSeenAt));
-                  }
-                
+              <TouchableOpacity
+                style={styles.titlePressable}
+                activeOpacity={0.7}
+                onPress={() =>
+                  navigation.navigate("ProfilePreview", {
+                    userId: String(peerUserId),
+                  })
+                }
+              >
+                {resolvedPeerAvatar && !avatarFailed ? (
+                  <Image
+                    source={{ uri: newUrl + resolvedPeerAvatar }}
+                    style={styles.headerAvatar}
+                    onError={() => setAvatarFailed(true)}
+                  />
+                ) : (
+                  <View style={styles.headerAvatarFallback}>
+                    {/* ✅ person icon fallback */}
+                    <Icon name="account" size={18} color="#cbd5e1" />
+                  </View>
+                )}
+
+                <Text numberOfLines={1} style={styles.title}>
+                  {peerName || "Friend"} {peerMood ? `[ is ${peerMood} ] ` : ""}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <FlatList
+              ref={flatRef}
+              data={items}
+              keyExtractor={(it) => it.id}
+              contentContainerStyle={[styles.listContent, { paddingBottom: 20 }]}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+              maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+              removeClippedSubviews={false}
+              initialNumToRender={20}
+              windowSize={10}
+              renderItem={({ item }) => {
+                if (item.type === "date") {
                   return (
-                    <View style={[styles.msgRow, isMe ? styles.msgRowMe : styles.msgRowOther]}>
-                      <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
-                        <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                          <Text style={styles.text}>{m.plaintext}</Text>
-                        </View>
-                        {isMe ? (
-  showBlueTick ? (
-    <Icon name="check-all" size={13} color="#2dd4bf" style={{marginLeft: 4}}>
-                              <Text style={styles.timeText}>{formatTime(m.createdAt)}</Text>
-                              </Icon>
-  ) : (
-    <Icon name="check" size={13} color="#a3a3a3" style={{marginLeft: 4}}>
-          <Text style={styles.timeText}>{formatTime(m.createdAt)}</Text>
-         </Icon>
-  )
-) : null}
-                      </View>
+                    <View style={styles.dateRow}>
+                      <Text style={styles.dateText}>{formatDateHeader(item.dateKey)}</Text>
                     </View>
                   );
-                }}
-                onContentSizeChange={scrollToBottom}
-              />
-            </View>
+                }
 
-            {/* ✅ Move input above keyboard by bottom = kbHeight */}
-     <View style={{marginBottom: 15}}>
-              <View style={styles.inputRow}>
-                <TextInput
-                  style={styles.input}
-                  placeholder="Type a message"
-                  placeholderTextColor="#94a3b8"
-                  value={input}
-                  onChangeText={setInput}
-                  multiline
-                />
-                <TouchableOpacity style={styles.sendBtn} onPress={send}>
-                  <Icon name="send" size={20} color="#fff" />
-                </TouchableOpacity>
-                </View>
+                const m = item.msg;
+                const isMe = String(m.fromUserId) === String(myUserId);
+
+                const effectiveTickState =
+                  isMe &&
+                  !m.seenAt &&
+                  !m.deliveredAt &&
+                  (
+                    isMessageDeliveredLocally(String(m._id)) ||
+                    (m.clientMessageId && isMessageDeliveredLocally(String(m.clientMessageId)))
+                  )
+                    ? "delivered"
+                    : m.tickState;
+
+                return (
+                  <View style={[styles.msgRow, isMe ? styles.msgRowMe : styles.msgRowOther]}>
+                    <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+                      <Text style={styles.text}>{m.plaintext}</Text>
+                      <View style={styles.metaRow}>
+                        {isMe ? renderTick({ ...m, tickState: effectiveTickState }) : null}
+                        <Text style={styles.timeText}>{formatTime(m.createdAt)}</Text>
+                      </View>
+                    </View>
+                  </View>
+                );
+              }}
+              onContentSizeChange={() => {
+                if (!didInitialAutoScrollRef.current) {
+                  didInitialAutoScrollRef.current = true;
+                  scrollToBottom();
+                }
+              }}
+            />
+          </View>
+
+          <View style={[styles.inputBar, { paddingBottom: insets.bottom, marginBottom: 5 }]}>
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.input}
+                placeholder={offline ? "Offline: message will stay local" : "Type a message"}
+                placeholderTextColor="#94a3b8"
+                value={input}
+                onChangeText={setInput}
+                multiline
+              />
+              <TouchableOpacity style={styles.sendBtn} onPress={send}>
+                <Icon name="send" size={20} color="#fff" />
+              </TouchableOpacity>
             </View>
           </View>
-        </TouchableWithoutFeedback>
-      </KeyboardAvoidingView>
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "rgba(15, 23, 42, 1)" },
+  safe: { flex: 1 },
   root: { flex: 1, backgroundColor: "#0f172a" },
+  innerContainer: { flex: 1 },
   baseBackground: { ...StyleSheet.absoluteFillObject, backgroundColor: "#020617" },
   glowTop: {
     position: "absolute",
@@ -503,9 +573,15 @@ const styles = StyleSheet.create({
     borderRadius: 240,
     backgroundColor: "rgba(168, 85, 247, 0.22)",
   },
-
   container: { flex: 1, paddingTop: 16, paddingHorizontal: 12 },
-  topBar: { flexDirection: "row", alignItems: "center", marginBottom: 1, paddingVertical: 6, marginTop: 15 },
+  topBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 1,
+    paddingVertical: 6,
+    marginTop: 15,
+  },
   iconBtn: {
     width: 42,
     height: 42,
@@ -515,9 +591,39 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     borderWidth: 1,
     borderColor: "rgba(148,163,184,0.35)",
+    marginRight: 8,
   },
-  title: { color: "#fff", fontSize: 18, fontWeight: "700", marginLeft: 12 },
 
+  titlePressable: {
+    flex: 1,
+    marginLeft: 12,
+    marginRight: 10,
+    paddingVertical: 4,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  headerAvatar: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.35)",
+    backgroundColor: "rgba(255,255,255,0.08)",
+  },
+  headerAvatarFallback: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    marginRight: 10,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.35)",
+  },
+
+  title: { color: "#fff", fontSize: 18, fontWeight: "700", flex: 1 },
   listContent: { paddingVertical: 8 },
   dateRow: { alignItems: "center", marginVertical: 10 },
   dateText: {
@@ -531,33 +637,22 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     overflow: "hidden",
   },
-
   msgRow: { width: "100%", flexDirection: "row", marginBottom: 8 },
   msgRowMe: { justifyContent: "flex-end" },
   msgRowOther: { justifyContent: "flex-start" },
-
   bubble: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, maxWidth: "82%", minWidth: 52 },
   bubbleMe: { backgroundColor: "#4f46e5" },
   bubbleOther: { backgroundColor: "rgba(255,255,255,0.06)" },
-
   text: { color: "#fff", flexShrink: 1, flexWrap: "wrap" },
-  timeText: { color: "rgba(255,255,255,0.75)", fontSize: 11, marginTop: 4, alignSelf: "flex-end", marginRight: 4 },
-
-  // absolute input bar
-  inputBar: {
-    position: "absolute",
-    left: 12,
-    right: 12,
+  timeText: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 11,
+    marginTop: 4,
+    alignSelf: "flex-end",
+    marginRight: 4,
   },
-  inputRow: {
-    flexDirection: "row",
-    padding: 10,
-    borderRadius: 16,
-    backgroundColor: "rgba(15, 23, 42, 0.9)",
-    borderWidth: 1,
-    borderColor: "rgba(148,163,184,0.35)",
-    alignItems: "center",
-  },
+  inputBar: { paddingTop: 8, backgroundColor: "transparent" },
+  inputRow: { flexDirection: "row", padding: 10, alignItems: "center", backgroundColor: "transparent" },
   input: {
     flex: 1,
     color: "#fff",
@@ -567,13 +662,17 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginRight: 8,
     maxHeight: 140,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.5)",
   },
   sendBtn: {
-    width: 44,
-    height: 44,
+    width: 40,
+    height: 40,
     borderRadius: 12,
     backgroundColor: "#6366f1",
     alignItems: "center",
     justifyContent: "center",
   },
+  metaRow: { flexDirection: "row", alignItems: "center", alignSelf: "flex-end", marginTop: 4 },
+  tickIcon: { marginRight: 4 },
 });

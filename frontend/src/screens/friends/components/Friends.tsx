@@ -8,6 +8,7 @@ import {
   ScrollView,
   Platform,
   StatusBar,
+  Image,
 } from "react-native";
 import { Text } from "@rneui/themed";
 import Icon from "react-native-vector-icons/MaterialCommunityIcons";
@@ -16,6 +17,7 @@ import AppScreen from "../../../components/Layout/AppScreen/AppScreen";
 import socialApi from "../services/api_friends";
 import AuthContext from "../../../auth/user/UserContext";
 import { UserProfile, FollowRequest } from "../models/FriendModel";
+import apiClient from "../../../auth/api-client/api_client";
 
 const GLASS_BG = "rgba(15, 23, 42, 0.65)";
 const GLASS_BORDER = "rgba(148, 163, 184, 0.35)";
@@ -82,6 +84,18 @@ const Friends = ({ navigation }: any) => {
 
   const isSearching = search.trim().length > 0;
 
+  const baseUrl = apiClient.getBaseURL();
+  const newUrl = baseUrl.replace(/\/api\/?$/, "");
+
+  const openProfilePreview = (u: any) => {
+    if (!u?._id) return;
+    navigation.navigate("ProfilePreview", {
+      userId: u._id,
+      name: u.name,
+      username: u.username,
+    });
+  };
+
   useEffect(() => {
     if (notification) {
       const timer = setTimeout(() => setNotification(null), 2300);
@@ -116,26 +130,27 @@ const Friends = ({ navigation }: any) => {
   const fetchRequests = useCallback(async () => {
     try {
       const res = await socialApi.getPendingFriendRequests();
-           const cleaned = (res?.data?.requests ?? [])
-             .map((r: any) => {
-               if (r?.user?._id) return r;
-               // normalize shape if API returns flat {_id, name, username, requestedAt}
-               return {
-                 ...r,
-                 user: {
-                   _id: r._id,
-                   name: r.name,
-                   username: r.username,
-                   avatarColor: r.avatarColor,
-                   isFriend: r.isFriend,
-                   requestSent: r.requestSent,
-                   requestIncoming: r.requestIncoming,
-                 },
-                 requestedAt: r.requestedAt,
-               };
-             })
-             .filter((r: any) => r?.user?._id);
-           setFriendRequests(cleaned);
+      const cleaned = (res?.data?.requests ?? [])
+        .map((r: any) => {
+          if (r?.user?._id) return r;
+          return {
+            ...r,
+            user: {
+              _id: r._id,
+              name: r.name,
+              username: r.username,
+              avatarColor: r.avatarColor,
+              avatarUrl: r.avatarUrl,
+              avatar: r.avatar,
+              isFriend: r.isFriend,
+              requestSent: r.requestSent,
+              requestIncoming: r.requestIncoming,
+            },
+            requestedAt: r.requestedAt,
+          };
+        })
+        .filter((r: any) => r?.user?._id);
+      setFriendRequests(cleaned);
     } catch (e) {
       setFriendRequests([]);
     }
@@ -228,20 +243,47 @@ const Friends = ({ navigation }: any) => {
       console.log("[FRIENDS] renderUserItem skipped bad user:", item);
       return null;
     }
-    const initials =
-      user.name?.split(" ").map((p) => p[0]).join("").toUpperCase().slice(0, 2) ||
-      user.username?.slice(0, 2)?.toUpperCase() ||
-      "?";
+
+    const rawAvatar =
+      (user as any).avatarThumbnailUrl ||
+      (user as any).avatarUrl ||
+      (user as any).avatar?.url ||
+      "";
+    const avatarUri = rawAvatar
+      ? rawAvatar.startsWith("http")
+        ? rawAvatar
+        : newUrl + rawAvatar
+      : "";
 
     return (
       <View style={styles.userCard}>
-        <View style={[styles.avatar, { backgroundColor: user.avatarColor || "rgba(55, 65, 81, 0.9)" }]}>
-          <Text style={styles.avatarText}>{initials}</Text>
-        </View>
-        <View style={styles.userInfo}>
-          <Text style={styles.userName}>{user.name ?? user.username}</Text>
-          <Text style={styles.userUsername}>{user.username}</Text>
-        </View>
+        <TouchableOpacity
+          activeOpacity={0.8}
+          style={styles.userClickable}
+          onPress={() => openProfilePreview(user)}
+        >
+          <View style={styles.avatar}>
+            {avatarUri ? (
+              <Image
+                source={{ uri: avatarUri }}
+                style={{ width: 40, height: 40, borderRadius: 999 }}
+                resizeMode="cover"
+              />
+            ) : (
+              // ✅ person icon fallback instead of initials
+              <Icon name="account" size={20} color="#E5E7EB" />
+            )}
+          </View>
+
+          <View style={styles.userInfo}>
+            <Text style={styles.userName} numberOfLines={1}>
+              {user.name ?? user.username}
+            </Text>
+            <Text style={styles.userUsername} numberOfLines={1}>
+              {user.username}
+            </Text>
+          </View>
+        </TouchableOpacity>
 
         {isRequest ? (
           <View style={{ flexDirection: "row" }}>
@@ -249,29 +291,47 @@ const Friends = ({ navigation }: any) => {
               activeOpacity={0.7}
               style={[
                 styles.addBtn,
-                { backgroundColor: loadingActions === user._id ? "#d1d5db" : "#22C55E", marginRight: 6 },
+                {
+                  backgroundColor: loadingActions === user._id ? "#d1d5db" : "#22C55E",
+                  marginRight: 6,
+                },
               ]}
               onPress={() => handleAcceptRequest(item as FollowRequest)}
               disabled={loadingActions === user._id}
             >
               <Icon name="check" size={18} color="#F9FAFB" />
-              <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Accept"}</Text>
+              <Text style={styles.addBtnText}>
+                {loadingActions === user._id ? "..." : "Accept"}
+              </Text>
             </TouchableOpacity>
+
             <TouchableOpacity
               activeOpacity={0.7}
-              style={[styles.addBtn, { backgroundColor: loadingActions === user._id ? "#d1d5db" : "#EF4444" }]}
+              style={[
+                styles.addBtn,
+                {
+                  backgroundColor: loadingActions === user._id ? "#d1d5db" : "#EF4444",
+                },
+              ]}
               onPress={() => handleRejectRequest(item as FollowRequest)}
               disabled={loadingActions === user._id}
             >
               <Icon name="close" size={18} color="#F9FAFB" />
-              <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Reject"}</Text>
+              <Text style={styles.addBtnText}>
+                {loadingActions === user._id ? "..." : "Reject"}
+              </Text>
             </TouchableOpacity>
           </View>
         ) : user.isFriend ? (
           <TouchableOpacity
             style={[styles.addBtn, { backgroundColor: "#6366f1" }]}
             activeOpacity={0.85}
-            onPress={() => setNotification({ type: "success", message: `Open chat with ${user.name || user.username}` })}
+            onPress={() =>
+              setNotification({
+                type: "success",
+                message: `Open chat with ${user.name || user.username}`,
+              })
+            }
           >
             <Icon name="chat" size={18} color="#F9FAFB" />
             <Text style={styles.addBtnText}>Chat</Text>
@@ -284,7 +344,9 @@ const Friends = ({ navigation }: any) => {
             disabled={loadingActions === user._id}
           >
             <Icon name="check" size={18} color="#F9FAFB" />
-            <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Added"}</Text>
+            <Text style={styles.addBtnText}>
+              {loadingActions === user._id ? "..." : "Added"}
+            </Text>
           </TouchableOpacity>
         ) : user.requestIncoming ? (
           <TouchableOpacity
@@ -299,7 +361,9 @@ const Friends = ({ navigation }: any) => {
             disabled={loadingActions === user._id}
           >
             <Icon name="account-arrow-left" size={18} color="#F9FAFB" />
-            <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Accept"}</Text>
+            <Text style={styles.addBtnText}>
+              {loadingActions === user._id ? "..." : "Accept"}
+            </Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
@@ -309,7 +373,9 @@ const Friends = ({ navigation }: any) => {
             disabled={loadingActions === user._id}
           >
             <Icon name="account-plus-outline" size={18} color="#F9FAFB" />
-            <Text style={styles.addBtnText}>{loadingActions === user._id ? "..." : "Add"}</Text>
+            <Text style={styles.addBtnText}>
+              {loadingActions === user._id ? "..." : "Add"}
+            </Text>
           </TouchableOpacity>
         )}
       </View>
@@ -331,7 +397,11 @@ const Friends = ({ navigation }: any) => {
       <AppScreen style={styles.root}>
         <GlassConfirmModal
           visible={!!showRemoveModal?.user}
-          message={showRemoveModal?.user ? `Remove friend request to ${showRemoveModal.user.name || showRemoveModal.user.username}?` : ""}
+          message={
+            showRemoveModal?.user
+              ? `Remove friend request to ${showRemoveModal.user.name || showRemoveModal.user.username}?`
+              : ""
+          }
           onCancel={handleRemoveModalCancel}
           onRemove={handleRemoveModalRemove}
         />
@@ -355,6 +425,7 @@ const Friends = ({ navigation }: any) => {
             <Text style={styles.topTitle}>Add Friends</Text>
             <View style={styles.topRightSpacer} />
           </View>
+
           <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
             <View style={styles.searchCard}>
               <Icon name="magnify" size={20} color="#9CA3AF" style={{ marginRight: 8 }} />
@@ -366,6 +437,7 @@ const Friends = ({ navigation }: any) => {
                 style={styles.searchInput}
               />
             </View>
+
             {friendRequests.length > 0 && (
               <View style={styles.userListCard}>
                 <View style={styles.sectionHeader}>
@@ -379,6 +451,7 @@ const Friends = ({ navigation }: any) => {
                   </View>
                   <Text style={styles.sectionHint}>Accept or ignore friend requests</Text>
                 </View>
+
                 <FlatList
                   data={requestListToShow}
                   keyExtractor={(item) =>
@@ -430,6 +503,7 @@ const Friends = ({ navigation }: any) => {
                 />
               </View>
             )}
+
             <View style={{ height: 40 }} />
           </ScrollView>
         </View>
@@ -574,7 +648,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     marginBottom: 18,
   },
-  searchInput: { flex: 1, color: "#E5E7EB", fontSize: 14 },
+  searchInput: { flex: 1, color: "#E5E7EB", fontSize: 12 },
   sectionHeader: { marginBottom: 10 },
   sectionTitle: { fontSize: 16, fontWeight: "700", color: "#F9FAFB" },
   sectionHint: { fontSize: 12, color: "#9CA3AF", marginTop: 2 },
@@ -593,6 +667,7 @@ const styles = StyleSheet.create({
   },
   listSeparator: { height: 1, backgroundColor: "rgba(31, 41, 55, 0.9)", marginVertical: 8 },
   userCard: { flexDirection: "row", alignItems: "center" },
+
   avatar: {
     width: 40,
     height: 40,
@@ -600,8 +675,12 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     marginRight: 10,
+    backgroundColor: "rgba(99, 102, 241, 0.25)",
+    borderWidth: 1,
+    borderColor: "rgba(191, 219, 254, 0.35)",
+    overflow: "hidden",
   },
-  avatarText: { color: "#0F172A", fontSize: 14, fontWeight: "700" },
+
   userInfo: { flex: 1 },
   userName: { fontSize: 14, fontWeight: "600", color: "#E5E7EB" },
   userUsername: { fontSize: 12, color: "#9CA3AF" },
@@ -626,6 +705,12 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { marginTop: 10, fontSize: 15, fontWeight: "600", color: "#E5E7EB" },
   emptyText: { marginTop: 4, fontSize: 12, color: "#9CA3AF", textAlign: "center" },
+  userClickable: {
+    flexDirection: "row",
+    alignItems: "center",
+    flex: 1,
+    marginRight: 10,
+  },
 });
 
 export default Friends;

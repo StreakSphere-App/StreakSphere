@@ -8,6 +8,10 @@ import {
   SectionList,
   TextInput,
   Platform,
+  Animated,
+  PanResponder,
+  GestureResponderEvent,
+  PanResponderGestureState,
 } from 'react-native';
 import {
   Camera,
@@ -27,8 +31,8 @@ type Habit = {
   habitName: string;
   label?: string;
   icon?: string;
-  time?: string;   // defaultTime from backend
-  group?: string;  // e.g. "Movement / Fitness"
+  time?: string;
+  group?: string;
 };
 
 type HabitSection = {
@@ -43,6 +47,8 @@ type Props = {
 
 const GLASS_BG = 'rgba(15, 23, 42, 0.65)';
 const GLASS_BORDER = 'rgba(148, 163, 184, 0.35)';
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 8;
 
 const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
   const authContext = useContext(AuthContext);
@@ -62,12 +68,21 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
   const [search, setSearch] = useState('');
   const [habitsLoading, setHabitsLoading] = useState(false);
 
+  // Camera refs and state
   const cameraRef = useRef<Camera | null>(null);
   const devices = useCameraDevices();
-  const device: CameraDevice | undefined =
-    devices.find(d => d.position === 'back') ?? devices[0];
+  const [cameraPosition, setCameraPosition] = useState<'back' | 'front'>('back');
+  
+  // Get current device based on position
+  const device: CameraDevice | undefined = devices.find(d => d.position === cameraPosition) ?? devices[0];
+  
+  // Zoom state
+  const [zoom, setZoom] = useState(MIN_ZOOM);
+  const zoomAnim = useRef(new Animated.Value(MIN_ZOOM)).current;
+  const lastZoom = useRef(MIN_ZOOM);
+  const lastPinchDistance = useRef(0);
 
-  // Glassy message modal (error / success)
+  // Glassy message modal
   const [modalMessage, setModalMessage] = useState<string | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
 
@@ -80,6 +95,14 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
     setModalVisible(false);
     setModalMessage(null);
   };
+
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // Camera permissions
   useEffect(() => {
@@ -94,20 +117,62 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
     })();
   }, []);
 
-  // Habits fetching (for picker)
+  // Habits fetching
   useEffect(() => {
     fetchHabits('');
   }, []);
 
   useEffect(() => {
     if (habitModalVisible) {
-      fetchHabits(search);  // auto refresh list on modal open
+      fetchHabits(search);
     }
   }, [habitModalVisible]);
-  
+
+  // Pinch gesture handler for zoom
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      
+      onPanResponderGrant: (evt: GestureResponderEvent) => {
+        const { touches } = evt.nativeEvent;
+        if (touches.length === 2) {
+          // Calculate initial distance between two fingers
+          const dx = touches[0].pageX - touches[1].pageX;
+          const dy = touches[0].pageY - touches[1].pageY;
+          lastPinchDistance.current = Math.sqrt(dx * dx + dy * dy);
+          lastZoom.current = zoom;
+        }
+      },
+      
+      onPanResponderMove: (evt: GestureResponderEvent, gestureState: PanResponderGestureState) => {
+        const { touches } = evt.nativeEvent;
+        if (touches.length === 2) {
+          // Calculate current distance
+          const dx = touches[0].pageX - touches[1].pageX;
+          const dy = touches[0].pageY - touches[1].pageY;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          
+          // Calculate zoom based on pinch scale
+          const scale = distance / lastPinchDistance.current;
+          let newZoom = lastZoom.current * scale;
+          
+          // Clamp zoom between min and max
+          newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+          
+          setZoom(newZoom);
+          zoomAnim.setValue(newZoom);
+        }
+      },
+      
+      onPanResponderRelease: () => {
+        lastZoom.current = zoom;
+        lastPinchDistance.current = 0;
+      },
+    })
+  ).current;
 
   const groupHabits = (items: Habit[]): HabitSection[] => {
-    console.log('groupHabits items.length:', items.length);
     const byGroup: Record<string, Habit[]> = {};
     items.forEach(h => {
       const groupName = h.group || 'Other';
@@ -122,10 +187,6 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
           (a.label || a.habitName).localeCompare(b.label || b.habitName),
         ),
       }));
-    console.log(
-      'groupHabits sections:',
-      sections.map(s => ({ title: s.title, count: s.data.length })),
-    );
     return sections;
   };
 
@@ -140,13 +201,12 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
         habitName: h.habitName,
         label: h.habitName,
         icon: h.icon,
-        group: h.group, // backend provides this
+        group: h.group,
       }));
 
       setHabits(normalized);
       setHabitSections(groupHabits(normalized));
 
-      // If we came with a preset habitId from route, set selectedHabit
       if (!selectedHabit && habitId) {
         const found = normalized.find(h => h.id === habitId);
         if (found) {
@@ -154,7 +214,6 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
         }
       }
     } catch (err) {
-      console.log('fetchHabits error:', err);
       setHabits([]);
       setHabitSections([]);
       showMessage('Failed to load activities. Please try again.');
@@ -164,20 +223,19 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const handleSearchHabit = (txt: string) => {
     setSearch(txt);
-  
     if (searchTimeout.current) {
       clearTimeout(searchTimeout.current);
     }
-  
     searchTimeout.current = setTimeout(() => {
       fetchHabits(txt);
     }, 400);
   };
-  
-  const userId = authContext?.User?.user?.id ;
+
+  const userId = authContext?.User?.user?.id;
+
   const uploadProof = async (uri: string, habitId: string) => {
     try {
-      setUploading(true);
+      if (isMountedRef.current) setUploading(true);
       const formData = new FormData();
       formData.append('proof', {
         uri,
@@ -188,40 +246,20 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
       formData.append('userId', userId);
 
       const res = await ProofApi.SubmitProof(formData);
-      console.log(res);
-      
       const data = (res as any).data ?? res;
 
-      if (data?.success) {
-        const reason = data.reason as string | undefined;
-
-        // Show a glassy success/notice card, then go back
-        if (reason) {
-          showMessage(reason);
-          // Optionally wait for user to close instead of auto-goBack
-          // Here we'll auto close + go back after a short delay
-          setTimeout(() => {
-            hideMessage();
-            navigation.goBack();
-          }, 1500);
-        } else {
-
-            navigation.goBack();
-        }
-      } else {
-        showMessage(data?.message || 'Upload failed. Please try again.');
+      if (!data?.success) {
+        console.log('Upload failed:', data?.message);
       }
     } catch (err) {
-      console.error('Upload error:', err);
-      showMessage('Server error while uploading proof.');
+      console.log('Upload error:', err);
     } finally {
-      setUploading(false);
+      if (isMountedRef.current) setUploading(false);
     }
   };
 
   const handleTakePhoto = async () => {
     if (!habitId) {
-      // Prompt user to select an activity, and open the picker
       showMessage('Please select an activity before capturing proof.');
       setHabitModalVisible(true);
       return;
@@ -235,11 +273,21 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
       });
 
       const filePath = `file://${photo.path}`;
-      await uploadProof(filePath, habitId);
+      uploadProof(filePath, habitId);
+      navigation.goBack();
     } catch (err) {
       console.error('Capture error:', err);
       showMessage('Failed to capture photo. Please try again.');
     }
+  };
+
+  // Toggle camera position
+  const toggleCamera = () => {
+    setCameraPosition(prev => prev === 'back' ? 'front' : 'back');
+    // Reset zoom when switching cameras
+    setZoom(MIN_ZOOM);
+    lastZoom.current = MIN_ZOOM;
+    zoomAnim.setValue(MIN_ZOOM);
   };
 
   // UI for loading / permission
@@ -260,10 +308,9 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
     );
   }
 
-  const selectedLabel =
-    selectedHabit?.habitName || 'Tap to select a activity';
+  const selectedLabel = selectedHabit?.habitName || 'Tap to select a activity';
 
-  // Modal for habit selection (glassy + grouped)
+  // Modal for habit selection
   const renderHabitList = () => (
     <Modal visible={habitModalVisible} transparent animationType="slide">
       <View style={styles.modalContainer}>
@@ -271,12 +318,7 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
           <AppText style={styles.modalTitle}>Select Activity</AppText>
 
           <View style={styles.searchWrapper}>
-            <Icon
-              name="magnify"
-              size={18}
-              color="#6B7280"
-              style={{ marginRight: 6 }}
-            />
+            <Icon name="magnify" size={18} color="#6B7280" style={{ marginRight: 6 }} />
             <TextInput
               style={styles.searchBar}
               value={search}
@@ -288,18 +330,14 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
           </View>
 
           {habitsLoading ? (
-            <View style={styles.modalLoading}>
-              <AppActivityIndicator visible />
-            </View>
+            <View style={styles.modalLoading} />
           ) : (
             <SectionList
               sections={habitSections}
               keyExtractor={item => item.id}
               renderSectionHeader={({ section }) => (
                 <View style={styles.sectionHeader}>
-                  <AppText style={styles.sectionHeaderText}>
-                    {section.title}
-                  </AppText>
+                  <AppText style={styles.sectionHeaderText}>{section.title}</AppText>
                 </View>
               )}
               renderItem={({ item }) => (
@@ -313,21 +351,11 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
                 >
                   <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                     <View style={styles.habitIconCircle}>
-                      <Icon
-                        name={item.icon || 'check'}
-                        size={20}
-                        color="#C4B5FD"
-                      />
+                      <Icon name={item.icon || 'check'} size={20} color="#C4B5FD" />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <AppText style={styles.habitNameText}>
-                        {item.label || item.habitName}
-                      </AppText>
-                      {item.time ? (
-                        <AppText style={styles.habitTimeText}>
-                          {item.time}
-                        </AppText>
-                      ) : null}
+                      <AppText style={styles.habitNameText}>{item.label || item.habitName}</AppText>
+                      {item.time ? <AppText style={styles.habitTimeText}>{item.time}</AppText> : null}
                     </View>
                   </View>
                 </TouchableOpacity>
@@ -338,10 +366,7 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
             />
           )}
 
-          <TouchableOpacity
-            style={styles.modalClose}
-            onPress={() => setHabitModalVisible(false)}
-          >
+          <TouchableOpacity style={styles.modalClose} onPress={() => setHabitModalVisible(false)}>
             <AppText style={styles.modalCloseText}>Cancel</AppText>
           </TouchableOpacity>
         </View>
@@ -351,31 +376,59 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
 
   return (
     <View style={styles.root}>
-      {/* Background glow to match dashboard vibe */}
+      {/* Background glow */}
       <View style={styles.baseBackground} />
       <View style={styles.glowTop} />
       <View style={styles.glowBottom} />
 
-      <Camera
-        ref={cameraRef}
-        style={StyleSheet.absoluteFillObject}
-        device={device}
-        isActive={!uploading}
-        photo={true}
-      />
+      {/* Camera with pinch gesture */}
+      <View style={StyleSheet.absoluteFillObject} {...panResponder.panHandlers}>
+        <Camera
+          ref={cameraRef}
+          style={StyleSheet.absoluteFillObject}
+          device={device}
+          isActive={true}
+          photo={true}
+          zoom={zoom}
+        />
+      </View>
+
+      {/* Zoom indicator */}
+      {/* <View style={styles.zoomIndicator}>
+        <View style={styles.zoomBar}>
+          <Animated.View 
+            style={[
+              styles.zoomFill,
+              {
+                width: zoomAnim.interpolate({
+                  inputRange: [MIN_ZOOM, MAX_ZOOM],
+                  outputRange: ['0%', '100%'],
+                }),
+              },
+            ]} 
+          />
+        </View>
+        <AppText style={styles.zoomText}>{zoom.toFixed(1)}x</AppText>
+      </View> */}
 
       {/* Overlay */}
       <View style={styles.overlay}>
-        {/* Top bar glass */}
+        {/* Top bar with camera toggle */}
         <View style={styles.topBar}>
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            style={styles.iconGlass}
-          >
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.iconGlass}>
             <Icon name="arrow-left" size={22} color="#E5E7EB" />
           </TouchableOpacity>
+          
           <AppText style={styles.title}>Capture Activity Proof</AppText>
-          <View style={{ width: 40 }} />
+          
+          {/* Camera toggle button */}
+          <TouchableOpacity onPress={toggleCamera} style={styles.iconGlass}>
+            <Icon 
+              name={cameraPosition === 'back' ? 'camera-front' : 'camera-rear'} 
+              size={22} 
+              color="#E5E7EB" 
+            />
+          </TouchableOpacity>
         </View>
 
         {/* Selected habit glass pill */}
@@ -386,62 +439,64 @@ const ProofVisionCameraScreen: React.FC<Props> = ({ navigation, route }) => {
             activeOpacity={0.9}
           >
             <View style={styles.selectedHabitIconWrap}>
-              <Icon
-                name={selectedHabit?.icon || 'check'}
-                size={22}
-                color="#C4B5FD"
-              />
+              <Icon name={selectedHabit?.icon || 'check'} size={22} color="#C4B5FD" />
             </View>
             <View style={{ flex: 1 }}>
               <AppText style={styles.selectedHabitLabel} numberOfLines={1}>
                 {selectedLabel}
               </AppText>
               {selectedHabit?.time && (
-                <AppText style={styles.selectedHabitTime}>
-                  {selectedHabit.time}
-                </AppText>
+                <AppText style={styles.selectedHabitTime}>{selectedHabit.time}</AppText>
               )}
             </View>
-            <Icon
-              name="chevron-up"
-              size={22}
-              color="#9CA3AF"
-              style={{ marginLeft: 4 }}
-            />
+            <Icon name="chevron-up" size={22} color="#9CA3AF" style={{ marginLeft: 4 }} />
           </TouchableOpacity>
         </View>
 
-        {/* Shutter glass ring */}
+        {/* Bottom controls */}
         <View style={styles.bottomBar}>
-          <TouchableOpacity
-            style={styles.shutterOuterGlass}
-            onPress={handleTakePhoto}
-            disabled={uploading}
-            activeOpacity={0.8}
+          {/* Zoom out button */}
+          <TouchableOpacity 
+            style={styles.zoomButton} 
+            onPress={() => {
+              const newZoom = Math.max(MIN_ZOOM, zoom - 0.5);
+              setZoom(newZoom);
+              lastZoom.current = newZoom;
+              zoomAnim.setValue(newZoom);
+            }}
           >
+            <Icon name="minus" size={20} color="#E5E7EB" />
+          </TouchableOpacity>
+
+          {/* Shutter button */}
+          <TouchableOpacity style={styles.shutterOuterGlass} onPress={handleTakePhoto} activeOpacity={0.8}>
             <View style={styles.shutterInner} />
+          </TouchableOpacity>
+
+          {/* Zoom in button */}
+          <TouchableOpacity 
+            style={styles.zoomButton} 
+            onPress={() => {
+              const newZoom = Math.min(MAX_ZOOM, zoom + 0.5);
+              setZoom(newZoom);
+              lastZoom.current = newZoom;
+              zoomAnim.setValue(newZoom);
+            }}
+          >
+            <Icon name="plus" size={20} color="#E5E7EB" />
           </TouchableOpacity>
         </View>
       </View>
 
       {renderHabitList()}
-
-      {/* Glassy message modal (error / success) */}
-      <GlassyErrorModal
-        visible={modalVisible}
-        message={modalMessage || ''}
-        onClose={hideMessage}
-      />
+      <GlassyErrorModal visible={modalVisible} message={modalMessage || ''} onClose={hideMessage} />
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#020617' },
-  baseBackground: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#020617',
-  },
+  baseBackground: { ...StyleSheet.absoluteFillObject, backgroundColor: '#020617' },
   glowTop: {
     position: 'absolute',
     top: -120,
@@ -471,6 +526,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  
   // Top bar
   topBar: {
     flexDirection: 'row',
@@ -479,8 +535,8 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   iconGlass: {
-    width: 40,
-    height: 40,
+    width: 44,
+    height: 44,
     borderRadius: 16,
     backgroundColor: 'rgba(15, 23, 42, 0.3)',
     borderWidth: 1,
@@ -495,12 +551,42 @@ const styles = StyleSheet.create({
   },
   title: { color: '#F9FAFB', fontSize: 16, fontWeight: '700' },
 
+  // Zoom indicator
+  zoomIndicator: {
+    position: 'absolute',
+    top: Platform.OS === 'android' ? 110 : 130,
+    left: 20,
+    right: 20,
+    alignItems: 'center',
+    zIndex: 10,
+  },
+  zoomBar: {
+    width: 150,
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  zoomFill: {
+    height: '100%',
+    backgroundColor: '#6366f1',
+  },
+  zoomText: {
+    color: '#F9FAFB',
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 6,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+
   // Selected habit pill
   selectedHabitBar: {
     position: 'absolute',
     left: 20,
     right: 20,
-    bottom: 130,
+    bottom: 140,
   },
   selectedHabitButton: {
     flexDirection: 'row',
@@ -532,12 +618,25 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  // Shutter
+  // Bottom bar with zoom controls
   bottomBar: {
     position: 'absolute',
     bottom: 40,
     left: 0,
     right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 30,
+  },
+  zoomButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(15, 23, 42, 0.5)',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.4)',
+    justifyContent: 'center',
     alignItems: 'center',
   },
   shutterOuterGlass: {
@@ -567,9 +666,9 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(0,0,0,0.0)',
     paddingHorizontal: 16,
-    marginBottom: 100
+    marginBottom: 100,
   },
   modalGlassCard: {
     width: '100%',
@@ -618,8 +717,8 @@ const styles = StyleSheet.create({
   },
   habitItem: {
     paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(31, 41, 55, 0.8)',
+    borderBottomWidth: 0.1,
+    borderBottomColor: "white",
   },
   habitIconCircle: {
     width: 32,
